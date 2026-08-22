@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.5.2"
+AGENT_VERSION = "1.5.3"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -1710,7 +1710,7 @@ class ResolveOperations:
 
         # 4. Action: onsets
         elif action == "onsets":
-            lead_ms = float(params.get("lead_offset_ms", 120.0))
+            lead_ms = float(params.get("lead_offset_ms", 160.0))
             window_size = int(sample_rate * 0.01)
             num_windows = len(samples) // max(1, window_size)
             energies = [sum(s * s for s in samples[i * window_size : (i + 1) * window_size]) for i in range(num_windows)]
@@ -1733,7 +1733,36 @@ class ResolveOperations:
                 "onsets": onsets[:50]
             }
 
-        # 4. Action: export_slice
+        # 5. Action: vad_clusters
+        elif action == "vad_clusters":
+            threshold_db = float(params.get("threshold_db", -34.0))
+            frame_samples = max(1, int(sample_rate / fps))
+            num_frames = len(samples) // frame_samples
+            clusters = []
+            in_speech = False
+            c_start = 0
+            for f in range(num_frames):
+                chunk = samples[f * frame_samples : (f + 1) * frame_samples]
+                rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
+                db = 20.0 * math.log10(max(1e-6, rms))
+                is_speech = (db > threshold_db)
+                if is_speech and not in_speech:
+                    in_speech = True
+                    c_start = f
+                elif not is_speech and in_speech:
+                    in_speech = False
+                    clusters.append({"start_frame": c_start, "end_frame": f - 1, "start_sec": round(c_start / fps, 3), "end_sec": round((f - 1) / fps, 3)})
+            if in_speech:
+                clusters.append({"start_frame": c_start, "end_frame": num_frames - 1, "start_sec": round(c_start / fps, 3), "end_sec": round((num_frames - 1) / fps, 3)})
+            return {
+                "action": "vad_clusters",
+                "clip_name": clip_name,
+                "threshold_db": threshold_db,
+                "clusters_count": len(clusters),
+                "clusters": clusters
+            }
+
+        # 6. Action: export_slice
         elif action == "export_slice":
             return {
                 "action": "export_slice",
@@ -1742,7 +1771,7 @@ class ResolveOperations:
                 "duration_sec": round(duration, 3),
             }
 
-        raise OperationError("Unknown audio action '%s'. Valid actions: analyze, silence_cuts, energy_envelope, export_slice" % action)
+        raise OperationError("Unknown audio action '%s'. Valid actions: analyze, silence_cuts, energy_envelope, onsets, vad_clusters, export_slice" % action)
 
     # ------------------------------------------------------------- dispatch
 

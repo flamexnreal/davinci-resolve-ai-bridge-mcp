@@ -24,11 +24,11 @@ def extract_media_audio(source_media_path: str, output_wav_path: Path, sample_ra
     if not source_p.exists():
         return False
 
-    # 1. If already a WAV file, copy or verify directly
+    # 1. If already a standard 16-bit PCM WAV file, copy directly
     if source_p.suffix.lower() == ".wav":
         try:
             with wave.open(str(source_p), "rb") as wf:
-                if wf.getnchannels() > 0:
+                if wf.getnchannels() > 0 and wf.getsampwidth() == 2 and wf.getframerate() == sample_rate:
                     shutil.copy2(str(source_p), str(output_wav_path))
                     return True
         except Exception:
@@ -238,7 +238,7 @@ def detect_acoustic_onsets(
     wav_path: Path,
     start_sec: float = 0.0,
     duration_sec: Optional[float] = None,
-    lead_offset_ms: float = 120.0,
+    lead_offset_ms: float = 160.0,
 ) -> List[float]:
     """Detect transient speech onsets using high-frequency energy derivative (spectral flux proxy)."""
     samples, sample_rate, _, _ = _read_wav_samples(wav_path, start_sec, duration_sec)
@@ -269,7 +269,7 @@ def detect_acoustic_onsets(
 
 def apply_lead_compensation(
     segments: List[Dict[str, Any]],
-    lead_offset_ms: float = 120.0,
+    lead_offset_ms: float = 160.0,
     fps: float = 24.0,
 ) -> List[Dict[str, Any]]:
     """Apply negative latency / lead offset to word/syllable timestamps to eliminate perceptual lag."""
@@ -290,4 +290,43 @@ def apply_lead_compensation(
         adjusted.append(new_seg)
 
     return adjusted
+
+
+def extract_speech_vad_clusters(
+    wav_path: Path,
+    start_sec: float = 0.0,
+    duration_sec: Optional[float] = None,
+    threshold_db: float = -34.0,
+    fps: float = 24.0,
+) -> List[Tuple[int, int]]:
+    """Scan audio waveform and group active speech frames (> threshold_db) into contiguous bursts."""
+    samples, sample_rate, _, _ = _read_wav_samples(wav_path, start_sec, duration_sec)
+    if not samples:
+        return []
+
+    frame_samples = max(1, int(sample_rate / fps))
+    num_frames = len(samples) // frame_samples
+
+    clusters = []
+    in_speech = False
+    c_start = 0
+
+    for f in range(num_frames):
+        chunk = samples[f * frame_samples : (f + 1) * frame_samples]
+        rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
+        db = 20.0 * math.log10(max(1e-6, rms))
+        is_speech = (db > threshold_db)
+
+        if is_speech and not in_speech:
+            in_speech = True
+            c_start = f
+        elif not is_speech and in_speech:
+            in_speech = False
+            clusters.append((c_start, f - 1))
+
+    if in_speech:
+        clusters.append((c_start, num_frames - 1))
+
+    return clusters
+
 

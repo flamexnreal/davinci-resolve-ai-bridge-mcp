@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "davinci-resolve-ai-bridge-mcp"
-version = "1.5.2"
+version = "1.5.3"
 description = "A local MCP bridge that lets AI coding assistants view and edit the project open in DaVinci Resolve"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -7,6 +7,16 @@ description: Plan, perform, and verify careful edits in an open DaVinci Resolve 
 
 Use this skill whenever a request involves the open DaVinci Resolve project.
 
+## Mandatory Live Timeline Audit Protocol
+
+**CRITICAL RULE FOR AI AGENTS**:
+Before analyzing audio, generating subtitles/captions, rendering motion graphics, or proposing any edit:
+1. **Always Call `timeline_overview` First**: Never assume previous timeline state, cached clip names, or raw files on disk. The user frequently records new microphone audio, cuts clips, trims in-points (`GetLeftOffset`), moves the playhead, or switches projects/timelines in DaVinci Resolve between prompts.
+2. **Target Active Playhead & In-Point Offset**: Always compute `source_frame = (playhead_frame - start_frame) + left_offset` to ensure exact sample-accurate alignment with what is visible in the viewer.
+3. **Normalize Audio to 16-bit PCM**: Always convert 24-bit/32-bit Fairlight audio files to 16-bit linear PCM (`LEI16@48000`) before seeking or analyzing to prevent 150% time dilation.
+4. **VAD Energy Snapping & -160ms Anticipatory Lead**: Group words into natural breath groups, snap word highlights strictly to physical acoustic energy peaks ($> -34\text{ dBFS}$), clear the screen during pauses, and apply an anticipatory lead offset of `-160ms` ($-4\text{ frames}$ at 24fps) so visual typography matches the consonant attack instantly with zero perceptual lag.
+5. **GPU Cache Invalidation**: When placing newly rendered transparent subtitle or motion graphic videos onto the timeline, always use a unique timestamped filename or disable old overlapping clips on lower tracks so DaVinci Resolve's GPU video memory immediately displays the fresh render.
+
 ## Required Workflow
 
 1. Call `resolve_status` before every editing session. It reports which transport is live.
