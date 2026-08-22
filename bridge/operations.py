@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.5.1"
+AGENT_VERSION = "1.5.2"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -1706,6 +1706,31 @@ class ResolveOperations:
                 "clip_name": clip_name,
                 "samples_count": len(envelope),
                 "envelope": envelope,
+            }
+
+        # 4. Action: onsets
+        elif action == "onsets":
+            lead_ms = float(params.get("lead_offset_ms", 120.0))
+            window_size = int(sample_rate * 0.01)
+            num_windows = len(samples) // max(1, window_size)
+            energies = [sum(s * s for s in samples[i * window_size : (i + 1) * window_size]) for i in range(num_windows)]
+            onsets = []
+            lead_sec = lead_ms / 1000.0
+            for i in range(1, len(energies) - 1):
+                diff = energies[i] - energies[i - 1]
+                if diff > 0.04 and energies[i] > 0.008:
+                    t = max(0.0, (i * 0.01) - lead_sec)
+                    onsets.append({
+                        "onset_sec": round(t, 3),
+                        "frame": int(round(t * fps)),
+                        "energy_delta": round(diff, 4)
+                    })
+            return {
+                "action": "onsets",
+                "clip_name": clip_name,
+                "lead_offset_ms": lead_ms,
+                "onsets_count": len(onsets),
+                "onsets": onsets[:50]
             }
 
         # 4. Action: export_slice

@@ -232,3 +232,62 @@ def compute_energy_envelope(
         })
 
     return envelope
+
+
+def detect_acoustic_onsets(
+    wav_path: Path,
+    start_sec: float = 0.0,
+    duration_sec: Optional[float] = None,
+    lead_offset_ms: float = 120.0,
+) -> List[float]:
+    """Detect transient speech onsets using high-frequency energy derivative (spectral flux proxy)."""
+    samples, sample_rate, _, _ = _read_wav_samples(wav_path, start_sec, duration_sec)
+    if not samples:
+        return []
+
+    window_size = int(sample_rate * 0.01)  # 10ms windows
+    if window_size <= 0:
+        return []
+
+    num_windows = len(samples) // window_size
+    energies = []
+    for i in range(num_windows):
+        chunk = samples[i * window_size : (i + 1) * window_size]
+        e = sum(s * s for s in chunk)
+        energies.append(e)
+
+    onsets = []
+    lead_sec = lead_offset_ms / 1000.0
+    for i in range(1, len(energies) - 1):
+        diff = energies[i] - energies[i - 1]
+        if diff > 0.05 and energies[i] > 0.01:
+            t = start_sec + (i * 0.01) - lead_sec
+            onsets.append(round(max(0.0, t), 3))
+
+    return onsets
+
+
+def apply_lead_compensation(
+    segments: List[Dict[str, Any]],
+    lead_offset_ms: float = 120.0,
+    fps: float = 24.0,
+) -> List[Dict[str, Any]]:
+    """Apply negative latency / lead offset to word/syllable timestamps to eliminate perceptual lag."""
+    lead_sec = lead_offset_ms / 1000.0
+    lead_frames = int(round((lead_offset_ms / 1000.0) * fps))
+
+    adjusted = []
+    for seg in segments:
+        new_seg = dict(seg)
+        if "start_sec" in new_seg:
+            new_seg["start_sec"] = max(0.0, round(new_seg["start_sec"] - lead_sec, 3))
+        if "start_frame" in new_seg:
+            new_seg["start_frame"] = max(0, new_seg["start_frame"] - lead_frames)
+        if "end_sec" in new_seg:
+            new_seg["end_sec"] = max(new_seg.get("start_sec", 0.0), round(new_seg["end_sec"] - (lead_sec * 0.5), 3))
+        if "end_frame" in new_seg:
+            new_seg["end_frame"] = max(new_seg.get("start_frame", 0), new_seg["end_frame"] - max(1, lead_frames // 2))
+        adjusted.append(new_seg)
+
+    return adjusted
+
