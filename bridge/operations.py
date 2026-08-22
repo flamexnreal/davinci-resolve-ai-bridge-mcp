@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.5.0"
+AGENT_VERSION = "1.5.1"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -258,6 +258,8 @@ class ResolveOperations:
             "start": call(item, "GetStart", None),
             "end": call(item, "GetEnd", None),
             "duration": call(item, "GetDuration", None),
+            "left_offset": call(item, "GetLeftOffset", 0),
+            "right_offset": call(item, "GetRightOffset", 0),
             "enabled": call(item, "GetClipEnabled", None),
             "color": call(item, "GetClipColor", ""),
             "media_pool_id": media_id,
@@ -1481,28 +1483,65 @@ class ResolveOperations:
         action = str(params.get("action", "analyze")).lower()
         threshold_db = float(params.get("silence_threshold_db", -40.0))
         min_silence_duration = float(params.get("min_silence_duration", 0.3))
-        track_index = int(params.get("track_index", 1))
+        track_index = int(params.get("track_index", 1)) if "track_index" in params else None
 
-        # Find target audio or video clip on timeline
+        # 1. Determine active playhead frame
+        requested_tc = params.get("timecode")
+        if requested_tc:
+            timeline.SetCurrentTimecode(str(requested_tc).strip())
+        current_frame = self._current_marker_frame(timeline)
+        current_tc = call(timeline, "GetCurrentTimecode", "00:00:00:00")
+
+        # 2. Find target audio or video clip on timeline covering playhead
         target_item = None
         target_track_type = "audio"
+        audio_tracks = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
+        video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
 
         # Check audio tracks first
-        audio_tracks = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
-        if track_index <= audio_tracks and track_index > 0:
-            items = call(timeline, "GetItemListInTrack", [], "audio", track_index) or []
-            if items:
-                target_item = items[0]
+        track_search_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
+        for a_idx in track_search_range:
+            items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
+            for item in items:
+                s = call(item, "GetStart", None)
+                e = call(item, "GetEnd", None)
+                if s is not None and e is not None and s <= current_frame < e:
+                    target_item = item
+                    target_track_type = "audio"
+                    break
+            if target_item is not None:
+                break
 
-        # If no audio track item found, check video track for embedded audio
+        # If not under playhead in audio tracks, check video tracks
         if target_item is None:
-            video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
-            for v_idx in range(1, video_tracks + 1):
+            v_search_range = [track_index] if (track_index and 1 <= track_index <= video_tracks) else range(1, video_tracks + 1)
+            for v_idx in v_search_range:
                 items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
+                for item in items:
+                    s = call(item, "GetStart", None)
+                    e = call(item, "GetEnd", None)
+                    if s is not None and e is not None and s <= current_frame < e:
+                        target_item = item
+                        target_track_type = "video"
+                        break
+                if target_item is not None:
+                    break
+
+        # Fallback to first available clip if playhead is on an empty gap
+        if target_item is None:
+            for a_idx in range(1, audio_tracks + 1):
+                items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
                 if items:
                     target_item = items[0]
-                    target_track_type = "video"
+                    target_track_type = "audio"
                     break
+            if target_item is None:
+                for v_idx in range(1, video_tracks + 1):
+                    items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
+                    if items:
+                        target_item = items[0]
+                        target_track_type = "video"
+                        break
 
         if target_item is None:
             raise OperationError("No audio or video clips found on the active timeline.")
@@ -1513,6 +1552,23 @@ class ResolveOperations:
 
         if not file_path or not Path(file_path).exists():
             raise OperationError("Media file for clip '%s' is offline or missing on disk." % clip_name)
+
+        # 3. Calculate exact trimmed source offset
+        clip_start = call(target_item, "GetStart", 0) or 0
+        clip_end = call(target_item, "GetEnd", 0) or 0
+        clip_duration = call(target_item, "GetDuration", 0) or max(1, clip_end - clip_start)
+        left_offset = call(target_item, "GetLeftOffset", 0) or 0
+
+        # Calculate where in the source media file the active playhead is
+        if clip_start <= current_frame < clip_end:
+            source_frame_start = (current_frame - clip_start) + left_offset
+            remaining_frames = clip_end - current_frame
+        else:
+            source_frame_start = left_offset
+            remaining_frames = clip_duration
+
+        source_start_sec = max(0.0, float(source_frame_start) / max(1.0, fps))
+        duration_sec = max(0.1, float(remaining_frames) / max(1.0, fps))
 
         # Extract to temporary WAV file using afconvert or ffmpeg
         audio_dir = Path(tempfile.gettempdir()) / "resolve-audio-analysis"
@@ -1538,12 +1594,17 @@ class ResolveOperations:
         if not extracted:
             raise OperationError("Could not decode audio from media file '%s'." % file_path)
 
-        # Read samples
+        # Read only the trimmed playhead slice
         with wave.open(str(temp_wav), "rb") as wf:
             channels = wf.getnchannels()
             sample_rate = wf.getframerate()
-            total_frames = wf.getnframes()
-            raw_bytes = wf.readframes(total_frames)
+            total_wav_frames = wf.getnframes()
+
+            start_wav_pos = min(total_wav_frames, max(0, int(source_start_sec * sample_rate)))
+            frames_to_read = min(total_wav_frames - start_wav_pos, int(duration_sec * sample_rate))
+
+            wf.setpos(start_wav_pos)
+            raw_bytes = wf.readframes(frames_to_read)
 
         num_samples = len(raw_bytes) // (2 * channels)
         fmt = "<%dh" % (num_samples * channels)
@@ -1554,7 +1615,17 @@ class ResolveOperations:
         else:
             samples = [((raw_ints[i * 2] + raw_ints[i * 2 + 1]) / 2.0) / 32768.0 for i in range(num_samples)]
 
-        duration = total_frames / float(sample_rate)
+        slice_duration = len(samples) / float(sample_rate)
+
+        # Write trimmed slice to a dedicated WAV file for inspection / AI transcription
+        slice_wav = audio_dir / ("slice_%d_%s.wav" % (int(time.time() * 1000), current_tc.replace(":", "_")))
+        with wave.open(str(slice_wav), "wb") as wf_out:
+            wf_out.setnchannels(channels)
+            wf_out.setsampwidth(2)
+            wf_out.setframerate(sample_rate)
+            wf_out.writeframes(raw_bytes)
+
+        duration = slice_duration
 
         # 1. Action: analyze
         if action == "analyze":
@@ -1567,6 +1638,8 @@ class ResolveOperations:
                 "action": "analyze",
                 "clip_name": clip_name,
                 "track_type": target_track_type,
+                "timecode": current_tc,
+                "source_start_sec": round(source_start_sec, 3),
                 "duration_sec": round(duration, 3),
                 "sample_rate": sample_rate,
                 "channels": channels,
@@ -1574,7 +1647,7 @@ class ResolveOperations:
                 "rms_dbfs": round(rms_db, 2),
                 "is_clipping": bool(peak_db >= -0.05),
                 "health": "healthy" if peak_db < -0.5 and rms_db > -35.0 else "warning_loud" if peak_db >= -0.5 else "warning_quiet",
-                "wav_path": str(temp_wav),
+                "wav_path": str(slice_wav),
             }
 
         # 2. Action: silence_cuts

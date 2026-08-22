@@ -3,8 +3,8 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "resolve-ai-bridge"
-version = "1.5.0"
+name = "davinci-resolve-ai-bridge-mcp"
+version = "1.5.1"
 description = "A local MCP bridge that lets AI coding assistants view and edit the project open in DaVinci Resolve"
 readme = "README.md"
 requires-python = ">=3.10"

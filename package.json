@@ -1,6 +1,6 @@
 {
   "name": "davinci-resolve-ai-bridge-mcp",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "A local MCP bridge that lets AI coding assistants (Antigravity, Claude, Cursor, Codex) view and edit the project open in DaVinci Resolve",
   "type": "module",
   "bin": {
