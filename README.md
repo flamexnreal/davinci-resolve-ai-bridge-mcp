@@ -42,11 +42,30 @@ The installer sets up the local isolated runtime environment, installs dependenc
 
 ---
 
-## How It Works
+## How to Connect to DaVinci Resolve
 
-1. **Open DaVinci Resolve** and open any project or timeline.
-2. **Direct attach (default)**: The bridge connects automatically through Resolve's native scripting interface.
-3. **Fallback launcher**: If your build requires the internal console, choose **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge** in Resolve, or paste the activation command into the Py3 Console.
+### For Free Version Users (Standard Setup)
+
+1. Open **DaVinci Resolve** with any project or timeline.
+2. In the top menu bar, click **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
+   * *This opens the Console window and automatically copies the activation command directly to your clipboard.*
+3. In the Console window, click the **Py3** tab at the top, press **Cmd+V** (macOS) or **Ctrl+V** (Windows) to paste, and press **Enter**.
+
+*(Backup: If the command did not copy automatically, copy and paste this line into the Py3 tab:)*
+```python
+import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
+```
+
+Once activated, the bridge stays live and auto-reloading for your entire editing session.
+
+---
+
+### For Studio Version Users ($295 License)
+
+DaVinci Resolve Studio supports background external socket scripting with zero clicks:
+1. Open **DaVinci Resolve > Preferences > System > General**.
+2. Set **External scripting using** to **Local** and click **Save**.
+3. The bridge connects **automatically in the background with zero clicks** whenever Resolve is open.
 
 ---
 
