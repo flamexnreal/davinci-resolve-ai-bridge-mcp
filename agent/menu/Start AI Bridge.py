@@ -34,17 +34,20 @@ def _copy_to_clipboard(text):
 
 def main():
     copied = _copy_to_clipboard(PORTABLE_CMD)
-    print("\n" + "=" * 70)
+    paste_key = "Cmd+V" if sys.platform == "darwin" else "Ctrl+V"
+    print("\n" + "=" * 72)
     print("RESOLVE AI BRIDGE ACTIVATION")
-    print("=" * 70)
+    print("=" * 72)
     if copied:
-        print(">>> [COPIED TO CLIPBOARD] The command is already in your clipboard! <<<\n")
+        print("[AUTO-COPIED] The activation command is already in your clipboard!\n")
     else:
-        print("Copy this command:\n   " + PORTABLE_CMD + "\n")
-    print("Next step:")
+        print("Copy the activation command below:\n")
+    print("Command:")
+    print("   " + PORTABLE_CMD + "\n")
+    print("Next steps:")
     print("1. Click the 'Py3' tab at the top of this Console window.")
-    print("2. Press %s (Paste) and hit Enter." % ("Cmd+V" if sys.platform == "darwin" else "Ctrl+V"))
-    print("=" * 70 + "\n")
+    print("2. Press %s (Paste) and hit Enter." % paste_key)
+    print("=" * 72 + "\n")
 
 
 if __name__ == "__main__":
