@@ -40,9 +40,7 @@ def main():
     print("=" * 72)
     if copied:
         print("[AUTO-COPIED] The activation command is already in your clipboard!\n")
-    else:
-        print("Copy the activation command below:\n")
-    print("Command:")
+    print("Command to paste (if it didn't copy automatically):")
     print("   " + PORTABLE_CMD + "\n")
     print("Next steps:")
     print("1. Click the 'Py3' tab at the top of this Console window.")
