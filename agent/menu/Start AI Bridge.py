@@ -1,41 +1,54 @@
 #!/usr/bin/env python
 """Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.
 
-Directly starts or attaches the Resolve AI Bridge Console worker.
+Copies the activation command to clipboard and explains the Py3 step.
 """
 
 import os
+import subprocess
 import sys
 
 HOME = os.path.expanduser(
     os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge")
 )
-AGENT = os.path.join(HOME, "ResolveConsole.py")
+PORTABLE_CMD = (
+    'import os;exec(open(os.path.expanduser('
+    '"~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())'
+)
+
+
+def _copy_to_clipboard(text):
+    try:
+        if sys.platform == "darwin":
+            p = subprocess.Popen("pbcopy", stdin=subprocess.PIPE)
+            p.communicate(text.encode("utf-8"))
+            return True
+        elif sys.platform.startswith("win"):
+            p = subprocess.Popen("clip", stdin=subprocess.PIPE)
+            p.communicate(text.encode("utf-8"))
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def main():
-    if not os.path.isfile(AGENT):
-        print("\nResolve AI Bridge is not installed at %s. Run install.py first.\n" % HOME)
-        return
-
-    if HOME not in sys.path:
-        sys.path.insert(0, HOME)
-
-    # Inform the worker to keep running in the background across menu execution
-    globals()["RESOLVE_AI_BRIDGE_KEEPALIVE"] = True
-    os.environ.pop("RESOLVE_AI_BRIDGE_NO_AUTOSTART", None)
-
-    try:
-        with open(AGENT, encoding="utf-8") as handle:
-            source = handle.read()
-        exec(compile(source, AGENT, "exec"), globals())
-    except Exception as exc:
-        print("\nCould not start Resolve AI Bridge automatically: %s" % exc)
-        print("Fallback: Open Workspace > Console, click Py3, and paste:")
-        print('import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())\n')
+    copied = _copy_to_clipboard(PORTABLE_CMD)
+    print("\n" + "=" * 70)
+    print("RESOLVE AI BRIDGE ACTIVATION")
+    print("=" * 70)
+    if copied:
+        print(">>> [COPIED TO CLIPBOARD] The command is already in your clipboard! <<<\n")
+    else:
+        print("Copy this command:\n   " + PORTABLE_CMD + "\n")
+    print("Next step:")
+    print("1. Click the 'Py3' tab at the top of this Console window.")
+    print("2. Press %s (Paste) and hit Enter." % ("Cmd+V" if sys.platform == "darwin" else "Ctrl+V"))
+    print("=" * 70 + "\n")
 
 
 if __name__ == "__main__":
     main()
+
 
 
