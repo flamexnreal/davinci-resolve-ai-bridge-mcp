@@ -3,10 +3,12 @@
 [![npm version](https://img.shields.io/npm/v/davinci-resolve-ai-bridge-mcp.svg)](https://www.npmjs.com/package/davinci-resolve-ai-bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![DaVinci Resolve Free & Studio](https://img.shields.io/badge/DaVinci%20Resolve-Free%20%26%20Studio-brightgreen.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 
 Resolve AI Bridge is an open-source local Model Context Protocol (MCP) bridge that lets AI coding assistants (Claude, Claude Code, Antigravity, Cursor, Windsurf, Codex, VS Code) inspect, analyze, and edit projects open in DaVinci Resolve (Free and Studio).
 
-**100% Free Version Compatible:** While almost all other DaVinci Resolve AI tools require the paid **$295 DaVinci Resolve Studio** license for external scripting, Resolve AI Bridge was built from the ground up to deliver full feature parity on the completely free version of DaVinci Resolve with zero paywalls.
+> ### 100% Free — No $295 Studio License Required
+> Other tools force you to buy **DaVinci Resolve Studio ($295)**. Resolve AI Bridge gives you **full feature parity on the free version** with zero paywalls.
 
 **Prerequisite:** Requires Python 3.10 or newer (download from [python.org/downloads](https://www.python.org/downloads/) if not already on your computer).
 
