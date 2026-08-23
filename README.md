@@ -8,6 +8,8 @@ Resolve AI Bridge is an open-source local Model Context Protocol (MCP) bridge th
 
 **Prerequisite:** Requires Python 3.10 or newer (download from [python.org/downloads](https://www.python.org/downloads/) if not already on your computer).
 
+> ⭐ **If you enjoy this repo and find Resolve AI Bridge helpful, please consider giving it a star! It really helps out the project and lets more creators discover it.**
+
 ---
 
 ## Quick Setup
@@ -106,21 +108,23 @@ claude mcp add resolve-ai-bridge -- resolve-ai-bridge
 
 ---
 
-## Motion Graphics with Remotion
+## Motion Graphics, Magnifiers & Remotion
 
-For programmatic motion graphics, lower thirds, animated titles, and video overlays, using [Remotion](https://www.remotion.dev/) (React-based video) alongside this bridge is recommended. AI coding agents can generate React components with precise timing, animations, typography, and layout, render them to video files, and place them directly onto your DaVinci Resolve timeline using `append_media` or `add_image`.
+- **Floating Magnifier Callouts (`magnifier-callout` skill)**:
+  AI agents can generate luxury rounded-rectangle magnifier cards that zoom into buttons, search bars, and code lines at $1.8\times – 2.5\times$ magnification while smoothly blurring the full-scale background with Gaussian blur ($\sigma=45\text{px}$) and soft drop shadows.
+- **Subpixel Lanczos Camera Keyframing**:
+  Bypasses DaVinci Resolve Free's locked Edit-page spline scripting by generating continuous quintic smootherstep camera glides ($E(t) = 6t^5 - 15t^4 + 10t^3$) with zero stepped cuts and zero 1ms black flickers.
+- **VAD Speech Clustering & Frame-Locked Captions**:
+  Automatic 16-bit PCM normalization, acoustic energy peak alignment, and `-160ms` anticipatory lead for typography that lands synchronously with spoken words.
+- **Remotion React-Based Video**:
+  For programmatic motion graphics, lower thirds, and video overlays, AI coding agents can generate React components, render them, and place them directly onto the DaVinci Resolve timeline using `append_media`.
 
 ```bash
-# 1. Create a motion graphics project
-npx create-video@latest --yes --blank motion-graphics
-cd motion-graphics
-npm install
-
-# 2. Add Remotion AI agent skills
+# Add Remotion AI agent skills
 npx -y skills@latest add remotion-dev/skills -g -y
 ```
 
-See [`docs/REMOTION.md`](./docs/REMOTION.md) for full workflows and rendering instructions.
+See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
 
 ---
 

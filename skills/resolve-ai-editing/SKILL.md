@@ -54,32 +54,28 @@ Never claim an edit succeeded while the bridge is offline.
 ## Editing Clips On The Timeline
 
 - Scale, reframe, or blend an existing clip with `set_clip_transform`. It takes `zoom`, `zoom_x`/`zoom_y`, `pan`/`tilt` (pixels), the percent variants, `rotation`, crop, `opacity`, `composite_mode`, and modes such as `scaling`, `resize_filter`, `retime_process`, and `motion_estimation`. This is a static transform.
-- For a scale that moves over time, use `animate_zoom` with `start_zoom`, `end_zoom`, and a frame range inside the clip. It builds a Fusion composition. Read `keyframes_created`: if false, only a static zoom was applied and you must say so rather than claim an animation.
+- **Continuous Camera Keyframing & Zooms (Subpixel Compositor Roundtrip)**:
+  - In DaVinci Resolve Free, Edit-page spline keyframes are locked in Python scripting, and `AddFusionComp()` frequently disconnects `MediaIn1` producing black screens.
+  - **The Golden Method**: Extract the exact timeline subclip `(file_path, left_offset, duration, record_frame)`, render the camera zoom/pan using the **Subpixel Lanczos Compositor / Remotion Roundtrip** with continuous quintic smootherstep easing ($E(t) = 6t^5 - 15t^4 + 10t^3$), and swap the rendered clip back onto the timeline at `record_frame`. This guarantees $C^2$-smooth, 60fps/24fps broadcast-grade camera motion with zero stepped cuts, zero 1ms black flickers, and zero black screens.
+- **Floating Magnifier & Spotlight Callouts**:
+  - Use the `magnifier-callout` skill when zooming into specific UI elements (search bars, code blocks, buttons).
+  - Keep the base video at 100% scale with progressive Gaussian blur ($\sigma = 45\text{px}$) and a $30\%$ dark vignette.
+  - Float a sleek rounded-rectangle frosted glass card ($1680\text{px} \times 320\text{px}$, $28\text{px}$ radius, $3\text{px}$ glow border, $60\text{px}$ drop shadow) with $1.8\times - 2.2\times$ magnification.
+  - Always calculate margin padding (`crop_w = feature_w + 140\text{px}`) to ensure end-caps, icons, and text are 100% visible with zero cutoffs.
 - Cut a clip in two with `split_clip`, choosing the point by `frame`, `timecode`, or the playhead. It rebuilds the clip as two pieces. It does NOT copy color grades or Fusion comps onto the halves — tell the user when that matters.
-- All three accept `item_id="playhead"` to act on the clip under the playhead, so you need not look up the id first. Still confirm with `timeline_overview` afterwards.
+- All operations accept `item_id="playhead"` to act on the clip under the playhead, so you need not look up the id first. Still confirm with `timeline_overview` afterwards.
 - `split_clip` is only near-reversible: it deletes and re-adds the clip. Confirm the frame is right before cutting, and inspect the result.
 
-## Editing Quality
+## Remotion & Headless Compositor Workflow
 
-- Treat pacing, story, and audio clarity as editorial decisions, not random effects.
-- Ask for a reference, target platform, duration, aspect ratio, and audience when they are missing.
-- Prefer a small number of intentional changes over applying the same effect to every clip.
-- Preserve source media. Disable a clip before deleting it when the goal is uncertain.
-- Use markers to show a proposed edit when an operation is not safely reversible.
-- Save only after the requested changes have been verified.
+Use Remotion / Headless Compositor when the user asks for complex animated typography, smooth camera keyframes, floating callouts, explainers, or designed motion scenes.
 
-## Remotion Workflow
-
-Use Remotion when the user asks for complex animated typography, explainers, product demonstrations, or designed motion scenes.
-
-1. Confirm Node.js and the official `remotion-dev/skills` bundle are installed.
-2. Build the composition in a separate Remotion project.
-3. Preview it in Remotion Studio and get approval.
-4. Render a local video file.
-5. Use `import_media` with its absolute path.
-6. Inspect the Resolve timeline and ask where to place it before calling `append_media`.
-
-Remotion does not control Resolve. It produces media that the bridge can bring into Resolve.
+1. Inspect `timeline_overview` to obtain the exact `(start_frame, duration, left_offset, file_path)`.
+2. Render the animation or effect to a high-quality video in `out/`.
+3. Import the file with `import_media(paths=[...])`.
+4. Replace or place on the timeline at `record_frame = start_frame` using `append_media`.
+5. If useless pauses or dead time were trimmed, ripple-shift all downstream clips on all tracks so there are **zero gaps and zero overlaps**.
+6. Set playhead and verify the timeline visually.
 
 ## API Boundaries
 

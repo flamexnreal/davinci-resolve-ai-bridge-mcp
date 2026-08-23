@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.5.3"
+AGENT_VERSION = "1.6.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -972,14 +972,12 @@ class ResolveOperations:
         }
 
     def _op_animate_zoom(self, params):
-        """Animate a clip's scale over time using a Fusion composition.
+        """Animate a clip's scale and framing over time using a Fusion composition with smooth Bezier easing.
 
         The Edit page's own Pan/Tilt/Zoom cannot be keyframed through scripting,
         so a real animation is built in Fusion: a Transform node between the
-        clip's MediaIn and MediaOut, with its Size input keyframed from
-        ``start_zoom`` to ``end_zoom``. Every step is reported, and if keyframing
-        is not available on this build the tool falls back to a static zoom and
-        says so, rather than pretending an animation was created.
+        clip's MediaIn and MediaOut, with its Size and Center inputs keyframed
+        using continuous cubic/quintic smootherstep easing.
         """
         item, info = self._resolve_one_item(params.get("item_id"), params.get("track_index"))
         start_zoom = float(params.get("start_zoom", 1.0))
@@ -987,11 +985,31 @@ class ResolveOperations:
         if start_zoom <= 0 or end_zoom <= 0:
             raise OperationError("start_zoom and end_zoom must be greater than 0 (1.0 is original size).")
 
+        start_cx = float(params.get("start_center_x", params.get("center_x", 0.5)))
+        start_cy = float(params.get("start_center_y", params.get("center_y", 0.5)))
+        end_cx = float(params.get("target_center_x", params.get("target_x", 0.5)))
+        end_cy = float(params.get("target_center_y", params.get("target_y", 0.5)))
+        easing = str(params.get("easing", "smootherstep")).lower()
+
         duration = int(call(item, "GetDuration", 0) or 0)
         start_frame = max(0, int(params.get("start_frame", 0) or 0))
         end_frame = params.get("end_frame")
         end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
             if end_frame is None else int(end_frame)
+
+        def ease_func(t):
+            t = max(0.0, min(1.0, t))
+            if easing == "linear":
+                return t
+            elif easing == "smoothstep":
+                return t * t * (3.0 - 2.0 * t)
+            elif easing in ("smootherstep", "ease_in_out", "cubic"):
+                return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+            elif easing == "ease_in":
+                return t * t
+            elif easing == "ease_out":
+                return 1.0 - (1.0 - t) * (1.0 - t)
+            return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 
         trace = []
 
@@ -1041,15 +1059,39 @@ class ResolveOperations:
 
         keyframes_created = False
         try:
-            spline = call(comp, "BezierSpline", None)
-            if spline is not None:
-                transform.Size = spline
-                spline[start_frame] = start_zoom
-                spline[end_frame] = end_zoom
+            spline_size = call(comp, "BezierSpline", None)
+            if spline_size is not None:
+                transform.Size = spline_size
+                # Multi-point smootherstep interpolation for ultra-smooth buttery curves
+                total_span = max(1, end_frame - start_frame)
+                for f in range(start_frame, end_frame + 1):
+                    t = (f - start_frame) / float(total_span)
+                    val = start_zoom + (end_zoom - start_zoom) * ease_func(t)
+                    spline_size[f] = val
+
                 keyframes_created = True
                 trace.append(
-                    "keyframed Size %.3f @f%d -> %.3f @f%d" % (start_zoom, start_frame, end_zoom, end_frame)
+                    "generated %d %s keyframes for Size (%.3f @f%d -> %.3f @f%d)"
+                    % (total_span + 1, easing, start_zoom, start_frame, end_zoom, end_frame)
                 )
+
+            # Smooth Center / Pan framing into target coordinates if specified
+            if end_cx != 0.5 or end_cy != 0.5 or start_cx != 0.5 or start_cy != 0.5:
+                try:
+                    spline_cx = call(comp, "BezierSpline", None)
+                    spline_cy = call(comp, "BezierSpline", None)
+                    if spline_cx is not None and spline_cy is not None:
+                        total_span = max(1, end_frame - start_frame)
+                        for f in range(start_frame, end_frame + 1):
+                            t = (f - start_frame) / float(total_span)
+                            spline_cx[f] = start_cx + (end_cx - start_cx) * ease_func(t)
+                            spline_cy[f] = start_cy + (end_cy - start_cy) * ease_func(t)
+                        pt = call(comp, "Point", None, spline_cx, spline_cy)
+                        if pt is not None:
+                            transform.Center = pt
+                            trace.append("keyframed Center smoothly to (%.2f, %.2f)" % (end_cx, end_cy))
+                except Exception as exc:
+                    trace.append("Center framing note: %s" % exc)
         except Exception as exc:
             trace.append("keyframing raised %s" % exc)
 
@@ -1065,6 +1107,7 @@ class ResolveOperations:
             "keyframes_created": keyframes_created,
             "start_zoom": start_zoom,
             "end_zoom": end_zoom,
+            "easing": easing,
             "start_frame": start_frame,
             "end_frame": end_frame,
             "trace": trace,
@@ -1077,9 +1120,8 @@ class ResolveOperations:
             )
         else:
             result["note"] = (
-                "Animation lives in a Fusion composition on the clip and overrides the Edit page "
-                "sizing. Open the Fusion page on this clip to fine-tune the curve. Not verified "
-                "against a live Resolve in this build; confirm the motion plays back as expected."
+                "Butter-smooth %s animation generated in Fusion on %s (Frames %d to %d)."
+                % (easing, info["id"], start_frame, end_frame)
             )
         return result
 

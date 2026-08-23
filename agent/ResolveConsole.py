@@ -375,6 +375,14 @@ class ResolveRuntime:
                 raise RuntimeError(
                     "Bridge token mismatch. Re-run install.py and update your AI client's MCP entry."
                 )
+            try:
+                import importlib
+                importlib.reload(operations)
+                self.operations = operations.ResolveOperations(
+                    lambda: self.resolve, token_id=self.token_id, transport="console"
+                )
+            except Exception:
+                pass
             response["result"] = self.operations.dispatch(
                 str(request.get("op", "")), request.get("params") or {}
             )
