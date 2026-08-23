@@ -6,6 +6,8 @@
 
 Resolve AI Bridge is an open-source local Model Context Protocol (MCP) bridge that lets AI coding assistants (Claude, Claude Code, Antigravity, Cursor, Windsurf, Codex, VS Code) inspect, analyze, and edit projects open in DaVinci Resolve (Free and Studio).
 
+**100% Free Version Compatible:** While almost all other DaVinci Resolve AI tools require the paid **$295 DaVinci Resolve Studio** license for external scripting, Resolve AI Bridge was built from the ground up to deliver full feature parity on the completely free version of DaVinci Resolve with zero paywalls.
+
 **Prerequisite:** Requires Python 3.10 or newer (download from [python.org/downloads](https://www.python.org/downloads/) if not already on your computer).
 
 > ⭐ **If you enjoy this repo and find Resolve AI Bridge helpful, please consider giving it a star! It really helps out the project and lets more creators discover it.**
@@ -130,7 +132,13 @@ See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
 
 ## Free vs Studio Version
 
-Blackmagic Design's scripting APIs provide a common superset for both the Free and Studio versions of DaVinci Resolve. No feature in this bridge requires Studio-only tools. If external scripting is disabled in Resolve Preferences, the bridge falls back to the internal Console worker and all tools behave identically.
+Most other DaVinci Resolve scripting and automation tools require you to purchase the **$295 DaVinci Resolve Studio** license because Blackmagic Design restricts standard external API access in the free version.
+
+**Resolve AI Bridge is completely free and works identically on both the Free and Studio versions of DaVinci Resolve.**
+
+* **Dual-Transport Architecture**: If external scripting is restricted or disabled in Resolve Preferences, the bridge automatically attaches via the internal Console worker (`ResolveConsole.py`).
+* **Subpixel Compositor Roundtrips**: Bypasses the Free edition's locked Edit-page spline scripting to deliver broadcast-quality keyframing, floating magnifier callouts, and kinetic typography.
+* **100% Feature Parity**: Timeline inspection, audio loudness analysis, frame capture, title generation, VAD speech sync, and media placement work on the Free version without any paid license or watermark.
 
 ---
 
