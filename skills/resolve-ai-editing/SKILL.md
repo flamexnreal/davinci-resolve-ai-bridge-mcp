@@ -14,7 +14,7 @@ Before analyzing audio, generating subtitles/captions, rendering motion graphics
 1. **Always Call `timeline_overview` First**: Never assume previous timeline state, cached clip names, or raw files on disk. The user frequently records new microphone audio, cuts clips, trims in-points (`GetLeftOffset`), moves the playhead, or switches projects/timelines in DaVinci Resolve between prompts.
 2. **Target Active Playhead & In-Point Offset**: Always compute `source_frame = (playhead_frame - start_frame) + left_offset` to ensure exact sample-accurate alignment with what is visible in the viewer.
 3. **Normalize Audio to 16-bit PCM**: Always convert 24-bit/32-bit Fairlight audio files to 16-bit linear PCM (`LEI16@48000`) before seeking or analyzing to prevent 150% time dilation.
-4. **VAD Energy Snapping & -160ms Anticipatory Lead**: Group words into natural breath groups, snap word highlights strictly to physical acoustic energy peaks ($> -34\text{ dBFS}$), clear the screen during pauses, and apply an anticipatory lead offset of `-160ms` ($-4\text{ frames}$ at 24fps) so visual typography matches the consonant attack instantly with zero perceptual lag.
+4. **VAD Energy Snapping & -160ms Anticipatory Lead**: Group words into natural breath groups, snap word highlights strictly to physical acoustic energy peaks ($> -34\text{ dBFS}$)$, clear the screen during pauses, and apply an anticipatory lead offset of `-160ms` ($-4\text{ frames}$ at 24fps) so visual typography matches the consonant attack instantly with zero perceptual lag.
 5. **GPU Cache Invalidation**: When placing newly rendered transparent subtitle or motion graphic videos onto the timeline, always use a unique timestamped filename or disable old overlapping clips on lower tracks so DaVinci Resolve's GPU video memory immediately displays the fresh render.
 
 ## Required Workflow
@@ -28,15 +28,19 @@ Before analyzing audio, generating subtitles/captions, rendering motion graphics
 7. Call `timeline_overview` again to verify the result.
 8. Ask for explicit approval before deletion, ripple deletion, or starting a render.
 
-## When The Bridge Is Offline
+## Camera Motion, Smooth Zooms & Multi-Keyframing
 
-`resolve_status` returns a `help` string. Pass it on rather than guessing. The order that fixes it:
+Use `animate_zoom` to generate native Fusion camera keyframes directly on timeline clips:
+- **14 Motion Curve Presets**: `linear`, `ease_in`, `quad_in`, `cubic_in`, `ease_out`, `quad_out`, `cubic_out`, `ease`, `quad_ease`, `cubic_ease`, `circular_ease`, `rebound_in`, `rebound_out`, `elastic_out`.
+- **Zoom Out**: Pass `direction="out"` or `start_zoom > end_zoom` (e.g. `start_zoom=1.6, end_zoom=1.0`). Passing `zoom < 1.0` (e.g. `0.55x`) shrinks the video into a centered floating card with black letterbox/pillarbox canvas borders.
+- **Multi-Keyframe Sequences (`keyframes`)**: Define multi-stage waypoint trajectories (e.g. fast punch-in -> typing hold -> gradual slow ease-in zoom out) with per-segment easing curves.
+- **AI Scenario Presets**: `punch_in` (snappy 1.35x), `pop_in` (1.38x with overshoot), `slow_push` (subtle 1.15x push), `dramatic` (1.60x build-up), `reveal` (1.40x to 1.0x pull-out), and `cinematic` (1.25x smootherstep glide).
 
-1. Open DaVinci Resolve with a project.
-2. **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
-3. Paste the line in `~/.resolve-ai-bridge/console-command.txt` into **Workspace > Console**, Py3 tab.
+## Color Grading & Organic Shimmer Effects
 
-Never claim an edit succeeded while the bridge is offline.
+- **Color Grades**: Use `set_clip_grade` and `get_clip_grade` to adjust saturation, slope, offset, and power via native ASC-CDL controls.
+- **Color Transitions**: Use `keyframe_clip_saturation` to smoothly transition clips between 100% color and black-and-white.
+- **Rainbow Cycles & Exposure Flicker**: Use `animate_color_fx` to generate continuous $360^\circ$ spectrum hue cycling and multi-harmonic organic lighting shimmer.
 
 ## Images And Overlays
 
@@ -54,21 +58,13 @@ Never claim an edit succeeded while the bridge is offline.
 ## Editing Clips On The Timeline
 
 - Scale, reframe, or blend an existing clip with `set_clip_transform`. It takes `zoom`, `zoom_x`/`zoom_y`, `pan`/`tilt` (pixels), the percent variants, `rotation`, crop, `opacity`, `composite_mode`, and modes such as `scaling`, `resize_filter`, `retime_process`, and `motion_estimation`. This is a static transform.
-- **Continuous Camera Keyframing & Zooms (Subpixel Compositor Roundtrip)**:
-  - In DaVinci Resolve Free, Edit-page spline keyframes are locked in Python scripting, and `AddFusionComp()` frequently disconnects `MediaIn1` producing black screens.
-  - **The Golden Method**: Extract the exact timeline subclip `(file_path, left_offset, duration, record_frame)`, render the camera zoom/pan using the **Subpixel Lanczos Compositor / Remotion Roundtrip** with continuous quintic smootherstep easing ($E(t) = 6t^5 - 15t^4 + 10t^3$), and swap the rendered clip back onto the timeline at `record_frame`. This guarantees $C^2$-smooth, 60fps/24fps broadcast-grade camera motion with zero stepped cuts, zero 1ms black flickers, and zero black screens.
-- **Floating Magnifier & Spotlight Callouts**:
-  - Use the `magnifier-callout` skill when zooming into specific UI elements (search bars, code blocks, buttons).
-  - Keep the base video at 100% scale with progressive Gaussian blur ($\sigma = 45\text{px}$) and a $30\%$ dark vignette.
-  - Float a sleek rounded-rectangle frosted glass card ($1680\text{px} \times 320\text{px}$, $28\text{px}$ radius, $3\text{px}$ glow border, $60\text{px}$ drop shadow) with $1.8\times - 2.2\times$ magnification.
-  - Always calculate margin padding (`crop_w = feature_w + 140\text{px}`) to ensure end-caps, icons, and text are 100% visible with zero cutoffs.
 - Cut a clip in two with `split_clip`, choosing the point by `frame`, `timecode`, or the playhead. It rebuilds the clip as two pieces. It does NOT copy color grades or Fusion comps onto the halves — tell the user when that matters.
 - All operations accept `item_id="playhead"` to act on the clip under the playhead, so you need not look up the id first. Still confirm with `timeline_overview` afterwards.
 - `split_clip` is only near-reversible: it deletes and re-adds the clip. Confirm the frame is right before cutting, and inspect the result.
 
 ## Remotion & Headless Compositor Workflow
 
-Use Remotion / Headless Compositor when the user asks for complex animated typography, smooth camera keyframes, floating callouts, explainers, or designed motion scenes.
+Use Remotion when the user asks for complex animated typography, floating callouts, explainers, or designed motion scenes.
 
 1. Inspect `timeline_overview` to obtain the exact `(start_frame, duration, left_offset, file_path)`.
 2. Render the animation or effect to a high-quality video in `out/`.

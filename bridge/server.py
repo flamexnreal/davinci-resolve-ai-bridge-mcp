@@ -404,14 +404,16 @@ def animate_zoom(
     end_frame: Optional[int] = None,
     target_center_x: float = 0.5,
     target_center_y: float = 0.5,
+    keyframes: Optional[list[dict[str, Any]]] = None,
+    reset: bool = False,
     track_index: Optional[int] = None,
 ) -> str:
-    """Animate a clip's scale and framing over time (smooth zooms, punch-ins, rebounds, pull-outs).
+    """Animate a clip's scale and framing over time (smooth zooms, punch-ins, rebounds, pull-outs, multi-keyframe paths).
 
     Supports full Zoom In and Zoom Out (`direction='out'`), all standard easing curves
     (`linear`, `ease_in`, `cubic_in`, `ease_out`, `cubic_out`, `ease`, `cubic_ease`,
-    `circular_ease`, `rebound_in`, `rebound_out`, `elastic_out`), and automated AI presets
-    (`punch_in`, `pop_in`, `slow_push`, `dramatic`, `reveal`, `cinematic`).
+    `circular_ease`, `rebound_in`, `rebound_out`, `elastic_out`), multi-keyframe arrays,
+    and automated AI presets (`punch_in`, `pop_in`, `slow_push`, `dramatic`, `reveal`, `cinematic`).
     """
     params: dict[str, Any] = {
         "item_id": item_id,
@@ -421,7 +423,10 @@ def animate_zoom(
         "start_frame": start_frame,
         "target_center_x": target_center_x,
         "target_center_y": target_center_y,
+        "reset": reset,
     }
+    if keyframes is not None:
+        params["keyframes"] = keyframes
     if start_zoom is not None:
         params["start_zoom"] = start_zoom
     if end_zoom is not None:

@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.8.0"
+AGENT_VERSION = "1.8.1"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -971,16 +971,56 @@ class ResolveOperations:
             ),
         }
 
+    def _build_ease_func(self, easing_name):
+        import math
+        easing = str(easing_name).lower().strip()
+
+        def ease_fn(t):
+            t_clamp = max(0.0, min(1.0, t))
+            if easing in ("linear", "none_linear"):
+                return t_clamp
+            elif easing in ("ease_in", "quad_in"):
+                return t_clamp * t_clamp
+            elif easing in ("cubic_in",):
+                return t_clamp * t_clamp * t_clamp
+            elif easing in ("ease_out", "quad_out"):
+                return 1.0 - (1.0 - t_clamp) * (1.0 - t_clamp)
+            elif easing in ("cubic_out", "snap_in", "punch_in"):
+                return 1.0 - math.pow(1.0 - t_clamp, 3)
+            elif easing in ("ease", "quad_ease", "ease_in_out", "smoothstep"):
+                return 2.0 * t_clamp * t_clamp if t_clamp < 0.5 else 1.0 - math.pow(-2.0 * t_clamp + 2.0, 2) / 2.0
+            elif easing in ("cubic_ease", "smootherstep", "cinematic"):
+                return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
+            elif easing in ("circular_ease", "circ_ease", "circular"):
+                return (1.0 - math.sqrt(1.0 - math.pow(2.0 * t_clamp, 2))) / 2.0 if t_clamp < 0.5 else (math.sqrt(1.0 - math.pow(-2.0 * t_clamp + 2.0, 2)) + 1.0) / 2.0
+            elif easing in ("rebound_in", "back_in", "anticipation"):
+                c1 = 1.70158
+                c3 = c1 + 1.0
+                return c3 * t_clamp * t_clamp * t_clamp - c1 * t_clamp * t_clamp
+            elif easing in ("rebound_out", "back_out", "overshoot", "pop"):
+                c1 = 1.70158
+                c3 = c1 + 1.0
+                return 1.0 + c3 * math.pow(t_clamp - 1.0, 3) + c1 * math.pow(t_clamp - 1.0, 2)
+            elif easing in ("rebound_ease", "back_ease", "back_in_out"):
+                c1 = 1.70158 * 1.525
+                return (math.pow(2.0 * t_clamp, 2) * ((c1 + 1.0) * 2.0 * t_clamp - c1)) / 2.0 if t_clamp < 0.5 else (math.pow(2.0 * t_clamp - 2.0, 2) * ((c1 + 1.0) * (t_clamp * 2.0 - 2.0) + c1) + 2.0) / 2.0
+            elif easing in ("elastic_out", "elastic", "spring"):
+                c4 = (2.0 * math.pi) / 3.0
+                return 0.0 if t_clamp == 0 else (1.0 if t_clamp == 1 else math.pow(2.0, -10.0 * t_clamp) * math.sin((t_clamp * 10.0 - 0.75) * c4) + 1.0)
+            elif easing in ("none", "step"):
+                return 1.0 if t_clamp >= 1.0 else 0.0
+            return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
+
+        return ease_fn
+
     def _op_animate_zoom(self, params):
         """Animate a clip's scale and framing over time using a Fusion composition with comprehensive curve presets.
 
         Supports all standard video editing curves (Linear, Ease In, Quad In, Cubic In,
         Ease Out, Quad Out, Cubic Out, Ease, Quad Ease, Cubic Ease, Circular Ease,
         Rebound In / Anticipation, Rebound Out / Overshoot, Elastic Spring), full Zoom Out
-        direction support, and automatic AI scenario heuristics.
+        direction support, multi-keyframe arrays, and automatic AI scenario heuristics.
         """
-        import math
-
         item, info = self._resolve_one_item(params.get("item_id"), params.get("track_index"))
         
         # 1. Preset & Direction Resolution
@@ -1046,70 +1086,7 @@ class ResolveOperations:
         end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
             if end_frame is None else int(end_frame)
 
-        # 2. Comprehensive Easing Function Table
-        def ease_func(t):
-            t_clamp = max(0.0, min(1.0, t))
-            
-            # Linear
-            if easing in ("linear", "none_linear"):
-                return t_clamp
-            
-            # Ease In / Quad In
-            elif easing in ("ease_in", "quad_in"):
-                return t_clamp * t_clamp
-            
-            # Cubic In
-            elif easing in ("cubic_in",):
-                return t_clamp * t_clamp * t_clamp
-            
-            # Ease Out / Quad Out
-            elif easing in ("ease_out", "quad_out"):
-                return 1.0 - (1.0 - t_clamp) * (1.0 - t_clamp)
-            
-            # Cubic Out / Snap In
-            elif easing in ("cubic_out", "snap_in", "punch_in"):
-                return 1.0 - math.pow(1.0 - t_clamp, 3)
-            
-            # Ease / Quad Ease / Ease In Out
-            elif easing in ("ease", "quad_ease", "ease_in_out", "smoothstep"):
-                return 2.0 * t_clamp * t_clamp if t_clamp < 0.5 else 1.0 - math.pow(-2.0 * t_clamp + 2.0, 2) / 2.0
-            
-            # Cubic Ease / Smootherstep
-            elif easing in ("cubic_ease", "smootherstep", "cinematic"):
-                return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
-            
-            # Circular Ease
-            elif easing in ("circular_ease", "circ_ease", "circular"):
-                return (1.0 - math.sqrt(1.0 - math.pow(2.0 * t_clamp, 2))) / 2.0 if t_clamp < 0.5 else (math.sqrt(1.0 - math.pow(-2.0 * t_clamp + 2.0, 2)) + 1.0) / 2.0
-            
-            # Rebound In (Anticipation Pullback)
-            elif easing in ("rebound_in", "back_in", "anticipation"):
-                c1 = 1.70158
-                c3 = c1 + 1.0
-                return c3 * t_clamp * t_clamp * t_clamp - c1 * t_clamp * t_clamp
-            
-            # Rebound Out (Overshoot & Settle)
-            elif easing in ("rebound_out", "back_out", "overshoot", "pop"):
-                c1 = 1.70158
-                c3 = c1 + 1.0
-                return 1.0 + c3 * math.pow(t_clamp - 1.0, 3) + c1 * math.pow(t_clamp - 1.0, 2)
-            
-            # Rebound Ease (Back In Out)
-            elif easing in ("rebound_ease", "back_ease", "back_in_out"):
-                c1 = 1.70158 * 1.525
-                return (math.pow(2.0 * t_clamp, 2) * ((c1 + 1.0) * 2.0 * t_clamp - c1)) / 2.0 if t_clamp < 0.5 else (math.pow(2.0 * t_clamp - 2.0, 2) * ((c1 + 1.0) * (t_clamp * 2.0 - 2.0) + c1) + 2.0) / 2.0
-            
-            # Elastic Out (Springy bounce)
-            elif easing in ("elastic_out", "elastic", "spring"):
-                c4 = (2.0 * math.pi) / 3.0
-                return 0.0 if t_clamp == 0 else (1.0 if t_clamp == 1 else math.pow(2.0, -10.0 * t_clamp) * math.sin((t_clamp * 10.0 - 0.75) * c4) + 1.0)
-            
-            # None / Step
-            elif easing in ("none", "step"):
-                return 1.0 if t_clamp >= 1.0 else 0.0
-            
-            # Default to smootherstep
-            return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
+        ease_func = self._build_ease_func(easing)
 
         trace = []
 
@@ -1158,40 +1135,99 @@ class ResolveOperations:
             trace.append("wiring the nodes raised %s (Fusion may have auto-connected)" % exc)
 
         keyframes_created = False
+        raw_keyframes = params.get("keyframes")
+        is_reset = bool(params.get("reset", False))
+        trace.append("debug_params: is_reset=%s, raw_kfs_type=%s, count=%s" % (is_reset, type(raw_keyframes).__name__, len(raw_keyframes) if isinstance(raw_keyframes, list) else 0))
+
         try:
-            spline_size = call(comp, "BezierSpline", None)
-            if spline_size is not None:
-                transform.Size = spline_size
-                # Multi-point smootherstep interpolation for ultra-smooth buttery curves
-                total_span = max(1, end_frame - start_frame)
-                for f in range(start_frame, end_frame + 1):
-                    t = (f - start_frame) / float(total_span)
-                    val = start_zoom + (end_zoom - start_zoom) * ease_func(t)
-                    spline_size[f] = val
+            comp.Lock()
+            try:
+                if is_reset:
+                    # Reset Transform to identity (1.0x, center (0.5, 0.5))
+                    lua_lines = [
+                        "AIBridgeZoom.Size = 1.0",
+                        "AIBridgeZoom.Center = Point(0.5, 0.5)"
+                    ]
+                    comp.Execute("\n".join(lua_lines))
+                    keyframes_created = True
+                    trace.append("reset AIBridgeZoom Transform to 1.0x scale and centered framing")
+                elif raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+                    # Sort keyframes by frame
+                    sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
+                    lua_lines = [
+                        "AIBridgeZoom.Size = BezierSpline()",
+                        "AIBridgeZoom.Center = Path()"
+                    ]
+                    # Generate multi-segment interpolation
+                    for i in range(len(sorted_kfs) - 1):
+                        k_curr = sorted_kfs[i]
+                        k_next = sorted_kfs[i + 1]
+                        
+                        f_start = int(k_curr.get("frame", 0))
+                        f_end = int(k_next.get("frame", f_start + 1))
+                        span = max(1, f_end - f_start)
+                        
+                        z_start = float(k_curr.get("zoom", k_curr.get("size", 1.0)))
+                        z_end = float(k_next.get("zoom", k_next.get("size", 1.0)))
+                        
+                        cx_start = float(k_curr.get("center_x", k_curr.get("cx", 0.5)))
+                        cx_end = float(k_next.get("center_x", k_next.get("cx", 0.5)))
+                        
+                        cy_start = float(k_curr.get("center_y", k_curr.get("cy", 0.5)))
+                        cy_end = float(k_next.get("center_y", k_next.get("cy", 0.5)))
+                        
+                        seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
+                        seg_ease_fn = self._build_ease_func(seg_easing)
+                        
+                        for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
+                            t = (f - f_start) / float(span)
+                            e = seg_ease_fn(t)
+                            z_val = z_start + (z_end - z_start) * e
+                            cx_val = cx_start + (cx_end - cx_start) * e
+                            cy_val = cy_start + (cy_end - cy_start) * e
+                            
+                            lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(f), z_val))
+                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(f), cx_val, cy_val))
+                    
+                    comp.Execute("\n".join(lua_lines))
+                    keyframes_created = True
+                    trace.append("generated multi-segment keyframe spline across %d control points" % len(sorted_kfs))
+                else:
+                    total_span = max(1, end_frame - start_frame)
+                    has_center_anim = (end_cx != 0.5 or end_cy != 0.5 or start_cx != 0.5 or start_cy != 0.5)
+                    lua_lines = [
+                        "AIBridgeZoom.Size = BezierSpline()"
+                    ]
+                    if has_center_anim:
+                        lua_lines.append("AIBridgeZoom.Center = Path()")
 
-                keyframes_created = True
-                trace.append(
-                    "generated %d %s keyframes for Size (%.3f @f%d -> %.3f @f%d)"
-                    % (total_span + 1, easing, start_zoom, start_frame, end_zoom, end_frame)
-                )
+                    if start_frame > 0:
+                        lua_lines.append("AIBridgeZoom.Size[0] = %f" % start_zoom)
+                        if has_center_anim:
+                            lua_lines.append("AIBridgeZoom.Center[0] = {%f, %f}" % (start_cx, start_cy))
+                    
+                    for f in range(start_frame, end_frame + 1):
+                        t = (f - start_frame) / float(total_span)
+                        val = start_zoom + (end_zoom - start_zoom) * ease_func(t)
+                        lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(f), val))
+                        if has_center_anim:
+                            cx = start_cx + (end_cx - start_cx) * ease_func(t)
+                            cy = start_cy + (end_cy - start_cy) * ease_func(t)
+                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(f), cx, cy))
 
-            # Smooth Center / Pan framing into target coordinates if specified
-            if end_cx != 0.5 or end_cy != 0.5 or start_cx != 0.5 or start_cy != 0.5:
-                try:
-                    spline_cx = call(comp, "BezierSpline", None)
-                    spline_cy = call(comp, "BezierSpline", None)
-                    if spline_cx is not None and spline_cy is not None:
-                        total_span = max(1, end_frame - start_frame)
-                        for f in range(start_frame, end_frame + 1):
-                            t = (f - start_frame) / float(total_span)
-                            spline_cx[f] = start_cx + (end_cx - start_cx) * ease_func(t)
-                            spline_cy[f] = start_cy + (end_cy - start_cy) * ease_func(t)
-                        pt = call(comp, "Point", None, spline_cx, spline_cy)
-                        if pt is not None:
-                            transform.Center = pt
-                            trace.append("keyframed Center smoothly to (%.2f, %.2f)" % (end_cx, end_cy))
-                except Exception as exc:
-                    trace.append("Center framing note: %s" % exc)
+                    if duration and end_frame < duration - 1:
+                        lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(duration - 1), end_zoom))
+                        if has_center_anim:
+                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(duration - 1), end_cx, end_cy))
+
+                    comp.Execute("\n".join(lua_lines))
+                    keyframes_created = True
+                    trace.append(
+                        "generated %d %s keyframes for Size (%.3f @f%d -> %.3f @f%d)"
+                        % (total_span + 1, easing, start_zoom, start_frame, end_zoom, end_frame)
+                    )
+            finally:
+                comp.Unlock()
         except Exception as exc:
             trace.append("keyframing raised %s" % exc)
 
@@ -1201,6 +1237,13 @@ class ResolveOperations:
                 trace.append("set a static Size of %.3f as a fallback" % end_zoom)
             except Exception as exc:
                 trace.append("static fallback raised %s" % exc)
+
+        if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+            start_zoom = float(raw_keyframes[0].get("zoom", 1.0))
+            end_zoom = float(raw_keyframes[-1].get("zoom", 1.0))
+            start_frame = int(raw_keyframes[0].get("frame", 0))
+            end_frame = int(raw_keyframes[-1].get("frame", duration - 1))
+            easing = "multi_segment_keyframes"
 
         result = {
             "item": info["id"],
@@ -1632,15 +1675,67 @@ class ResolveOperations:
         item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
         comp = item.GetFusionCompByIndex(1)
         if not comp:
-            comp = item.AddFusionComp()
+            return {"error": "No Fusion composition found on clip"}
         
         comp.Lock()
-        result = {}
+        result = {"tools": {}, "comp_attrs": {}}
         try:
-            spline = comp.BezierSpline()
-            result["spline_type"] = str(type(spline))
-            result["spline_methods"] = [m for m in dir(spline) if not m.startswith("_")][:30]
-            result["comp_methods"] = [m for m in dir(comp) if not m.startswith("_")][:30]
+            if params.get("exec_lua"):
+                comp.Execute(params["exec_lua"])
+                result["lua_executed"] = True
+            result["comp_attrs"] = {
+                "global_start": call(comp, "GetAttrs", 0, "COMPN_GlobalStart"),
+                "global_end": call(comp, "GetAttrs", 0, "COMPN_GlobalEnd"),
+                "render_start": call(comp, "GetAttrs", 0, "COMPN_RenderStart"),
+                "render_end": call(comp, "GetAttrs", 0, "COMPN_RenderEnd"),
+                "current_time": call(comp, "GetAttrs", 0, "COMPN_CurrentTime"),
+            }
+            tools = comp.GetToolList(False) or {}
+            tool_items = list(tools.values()) if isinstance(tools, dict) else list(tools)
+            for tool in tool_items:
+                name = getattr(tool, "Name", str(tool))
+                inputs = []
+                inps = tool.GetInputList() or {}
+                inp_list = list(inps.values()) if isinstance(inps, dict) else list(inps)
+                for inp in inp_list:
+                    try:
+                        inp_id = str(inp.GetAttrs("INPS_ID"))
+                        inp_name = str(inp.GetAttrs("INPS_Name"))
+                        conn = inp.GetConnectedOutput()
+                        connected_tool = None
+                        if conn:
+                            parent = conn.GetTool()
+                            connected_tool = getattr(parent, "Name", str(parent)) if parent else str(conn)
+                        inputs.append({"id": inp_id, "name": inp_name, "connected_to": connected_tool})
+                    except Exception as e:
+                        inputs.append({"err": str(e)})
+                
+                # Check main outputs
+                outs = tool.GetOutputList() or {}
+                out_list = list(outs.values()) if isinstance(outs, dict) else list(outs)
+                output_names = []
+                for out in out_list:
+                    try:
+                        output_names.append(str(out.GetAttrs("OUTS_ID")))
+                    except Exception:
+                        pass
+
+                # Get current input values for Transform and MediaIn
+                val_info = {}
+                for inp_key in ("Size", "Center", "GlobalIn", "GlobalOut", "HoldFirstFrame", "HoldLastFrame"):
+                    try:
+                        v = tool.GetInput(inp_key, 8.0)
+                        if v is not None:
+                            val_info[inp_key] = str(v)
+                    except Exception:
+                        pass
+
+                result["tools"][name] = {
+                    "reg_id": str(call(tool, "GetAttrs", "", "TOOLS_RegID")),
+                    "inputs": [i for i in inputs if i.get("connected_to") or i.get("id") in ("Input", "Size", "Center", "Saturation1")],
+                    "outputs": output_names,
+                    "values_at_f8": val_info,
+                }
         finally:
             comp.Unlock()
         return result
