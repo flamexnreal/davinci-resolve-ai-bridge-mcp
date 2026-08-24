@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.6.1"
+AGENT_VERSION = "1.7.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -1305,6 +1305,246 @@ class ResolveOperations:
             )
         return {"item": info["id"], "color": color or None}
 
+    def _op_get_clip_grade(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        graph = call(item, "GetNodeGraph")
+        num_nodes = call(graph, "GetNumNodes", 0) if graph else 0
+        comp_count = call(item, "GetFusionCompCount", 0) or 0
+        comp_names = call(item, "GetFusionCompNameList", []) or []
+        versions = call(item, "GetVersionNameList", [], 0) or []
+        current_version = call(item, "GetCurrentVersion", {}) or {}
+        return {
+            "item": info["id"],
+            "name": info["name"],
+            "num_color_nodes": num_nodes,
+            "fusion_comp_count": comp_count,
+            "fusion_comp_names": comp_names,
+            "versions": versions,
+            "current_version": current_version,
+        }
+
+    def _op_set_clip_grade(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        saturation = params.get("saturation")
+        slope = params.get("slope", "1.0 1.0 1.0")
+        offset = params.get("offset", "0.0 0.0 0.0")
+        power = params.get("power", "1.0 1.0 1.0")
+        node_index = str(params.get("node_index", 1))
+        reset = bool(params.get("reset", False))
+
+        graph = call(item, "GetNodeGraph")
+        if reset and graph:
+            call(graph, "ResetAllGrades")
+
+        cdl_map = {"NodeIndex": str(node_index)}
+        if saturation is not None:
+            cdl_map["Saturation"] = str(float(saturation))
+        if slope:
+            cdl_map["Slope"] = " ".join(str(v) for v in slope) if isinstance(slope, (list, tuple)) else str(slope)
+        if offset:
+            cdl_map["Offset"] = " ".join(str(v) for v in offset) if isinstance(offset, (list, tuple)) else str(offset)
+        if power:
+            cdl_map["Power"] = " ".join(str(v) for v in power) if isinstance(power, (list, tuple)) else str(power)
+
+        ok = item.SetCDL(cdl_map)
+        return {
+            "item": info["id"],
+            "name": info["name"],
+            "cdl": cdl_map,
+            "applied": bool(ok),
+        }
+
+    def _op_keyframe_clip_saturation(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        if not comp:
+            raise OperationError("Could not access or create Fusion composition on clip.")
+
+        duration = int(call(item, "GetDuration", 75) or 75)
+        start_sat = float(params.get("start_saturation", 1.0))
+        end_sat = float(params.get("end_saturation", 0.0))
+        start_frame = int(params.get("start_frame", 0))
+        end_frame = int(params.get("end_frame", max(1, duration - 1)))
+
+        comp.Lock()
+        cc = None
+        tool_debug = {}
+        try:
+            all_tools = comp.GetToolList(False) or {}
+            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
+            media_in = None
+            media_out = None
+
+            for t in tool_items:
+                t_name = getattr(t, "Name", str(t))
+                if "BrightnessContrast" in t_name or "ColorCorrector" in t_name:
+                    cc = t
+                elif "MediaIn" in t_name:
+                    media_in = t
+                elif "MediaOut" in t_name:
+                    media_out = t
+
+            if not cc:
+                # BrightnessContrast has direct "Saturation" property in Fusion
+                cc = comp.AddTool("BrightnessContrast")
+                if not cc:
+                    cc = comp.AddTool("ColorCorrector")
+
+            if cc and media_in and media_out:
+                try:
+                    cc.Input = media_in
+                except Exception:
+                    try:
+                        cc.ConnectInput("Input", media_in)
+                    except Exception:
+                        pass
+                try:
+                    media_out.Input = cc
+                except Exception:
+                    try:
+                        media_out.ConnectInput("Input", cc)
+                    except Exception:
+                        pass
+
+            if cc:
+                lua_cmd = """
+                ColorCorrector1.Saturation1 = BezierSpline()
+                ColorCorrector1.Saturation1[%f] = %f
+                ColorCorrector1.Saturation1[%f] = %f
+                """ % (float(start_frame), start_sat, float(end_frame), end_sat)
+                try:
+                    comp.Execute(lua_cmd)
+                    tool_debug["lua_execute_success"] = True
+                except Exception as e:
+                    tool_debug["lua_err"] = str(e)
+
+        finally:
+            comp.Unlock()
+
+        return {
+            "item": info["id"],
+            "name": info["name"],
+            "duration": duration,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "start_saturation": start_sat,
+            "end_saturation": end_sat,
+            "tool_type": getattr(cc, "Name", str(cc)) if cc else None,
+            "tool_debug": tool_debug,
+            "applied": True,
+        }
+
+    def _op_animate_color_fx(self, params):
+        import math
+        import random
+
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        if not comp:
+            raise OperationError("Could not access or create Fusion composition on clip.")
+
+        duration = int(call(item, "GetDuration", 75) or 75)
+        start_frame = int(params.get("start_frame", 0))
+        end_frame = int(params.get("end_frame", max(1, duration - 1)))
+        
+        rainbow = params.get("rainbow", True)
+        rainbow_cycles = float(rainbow) if isinstance(rainbow, (int, float)) and not isinstance(rainbow, bool) else (1.5 if rainbow else 0.0)
+        tint_strength = float(params.get("tint_strength", 0.70))
+        
+        flicker = params.get("flicker", True)
+        flicker_amp = float(flicker) if isinstance(flicker, (int, float)) and not isinstance(flicker, bool) else (0.05 if flicker else 0.0)
+        flicker_freq = float(params.get("flicker_frequency", 2.2))
+        
+        saturation = float(params.get("saturation", 1.3))
+
+        comp.Lock()
+        tool_debug = {}
+        try:
+            all_tools = comp.GetToolList(False) or {}
+            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
+            cc = None
+            media_in = None
+            media_out = None
+
+            for t in tool_items:
+                t_name = getattr(t, "Name", str(t))
+                if "ColorCorrector" in t_name:
+                    cc = t
+                elif "MediaIn" in t_name:
+                    media_in = t
+                elif "MediaOut" in t_name:
+                    media_out = t
+
+            if not cc:
+                cc = comp.AddTool("ColorCorrector")
+                if media_in and media_out and cc:
+                    cc.ConnectInput("Input", media_in)
+                    media_out.ConnectInput("Input", cc)
+
+            lua_lines = [
+                "ColorCorrector1.Saturation1 = %f" % saturation,
+                "ColorCorrector1.WheelSaturation1 = %f" % saturation,
+            ]
+
+            if rainbow_cycles > 0:
+                lua_lines.append("ColorCorrector1.WheelTintLength1 = %f" % tint_strength)
+                lua_lines.append("ColorCorrector1.WheelTintAngle1 = BezierSpline()")
+                num_steps = max(16, (end_frame - start_frame) // 2)
+                for step in range(num_steps + 1):
+                    t = float(start_frame) + (float(end_frame - start_frame) * step / num_steps)
+                    angle = (step / num_steps) * rainbow_cycles
+                    lua_lines.append("ColorCorrector1.WheelTintAngle1[%f] = %f" % (t, angle))
+
+            if flicker_amp > 0:
+                lua_lines.append("ColorCorrector1.MasterRGBGain = BezierSpline()")
+                rng = random.Random(42)
+                for f in range(start_frame, end_frame + 1):
+                    wave1 = math.sin(f * flicker_freq * 0.8) * 0.55
+                    wave2 = math.cos(f * flicker_freq * 1.6) * 0.30
+                    noise = (rng.random() - 0.5) * 0.30
+                    gain = 1.0 + (wave1 + wave2 + noise) * flicker_amp
+                    lua_lines.append("ColorCorrector1.MasterRGBGain[%f] = %f" % (float(f), gain))
+
+            full_lua = "\n".join(lua_lines)
+            comp.Execute(full_lua)
+            tool_debug["lua_executed"] = True
+        finally:
+            comp.Unlock()
+
+        return {
+            "item": info["id"],
+            "name": info["name"],
+            "duration": duration,
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+            "rainbow_cycles": rainbow_cycles,
+            "tint_strength": tint_strength,
+            "flicker_amplitude": flicker_amp,
+            "saturation": saturation,
+            "applied": True,
+        }
+
+    def _op_inspect_fusion(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        
+        comp.Lock()
+        result = {}
+        try:
+            spline = comp.BezierSpline()
+            result["spline_type"] = str(type(spline))
+            result["spline_methods"] = [m for m in dir(spline) if not m.startswith("_")][:30]
+            result["comp_methods"] = [m for m in dir(comp) if not m.startswith("_")][:30]
+        finally:
+            comp.Unlock()
+        return result
+
     def _op_delete_clips(self, params):
         ids = params.get("item_ids") or []
         if not ids:
@@ -1843,6 +2083,11 @@ class ResolveOperations:
             "set_clip_property": self._op_set_clip_property,
             "set_clip_enabled": self._op_set_clip_enabled,
             "set_clip_color": self._op_set_clip_color,
+            "get_clip_grade": self._op_get_clip_grade,
+            "set_clip_grade": self._op_set_clip_grade,
+            "keyframe_clip_saturation": self._op_keyframe_clip_saturation,
+            "animate_color_fx": self._op_animate_color_fx,
+            "inspect_fusion": self._op_inspect_fusion,
             "delete_clips": self._op_delete_clips,
             "save_project": self._op_save_project,
             "list_render_presets": self._op_list_render_presets,

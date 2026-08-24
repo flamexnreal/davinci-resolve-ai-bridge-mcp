@@ -487,6 +487,85 @@ def set_clip_color(item_id: str, color: str = "") -> str:
 
 
 @mcp.tool()
+def get_clip_grade(item_id: str) -> str:
+    """Inspect color grading nodes, versions, and Fusion compositions on a clip."""
+    return _result("get_clip_grade", {"item_id": item_id})
+
+
+@mcp.tool()
+def set_clip_grade(
+    item_id: str,
+    saturation: Optional[float] = None,
+    slope: str = "1.0 1.0 1.0",
+    offset: str = "0.0 0.0 0.0",
+    power: str = "1.0 1.0 1.0",
+    node_index: int = 1,
+    reset: bool = False,
+) -> str:
+    """Apply ASC-CDL color grading (saturation, slope/gain, offset/lift, power/gamma) to a clip. Pass saturation=0.0 for black & white."""
+    return _result(
+        "set_clip_grade",
+        {
+            "item_id": item_id,
+            "saturation": saturation,
+            "slope": slope,
+            "offset": offset,
+            "power": power,
+            "node_index": node_index,
+            "reset": reset,
+        },
+    )
+
+
+@mcp.tool()
+def keyframe_clip_saturation(
+    item_id: str,
+    start_saturation: float = 1.0,
+    end_saturation: float = 0.0,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
+) -> str:
+    """Animate a gradual color transition (e.g. from 1.0 full color to 0.0 black and white) across frames via Fusion BezierSpline on the clip."""
+    params: dict[str, Any] = {
+        "item_id": item_id,
+        "start_saturation": start_saturation,
+        "end_saturation": end_saturation,
+        "start_frame": start_frame,
+    }
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    return _result("keyframe_clip_saturation", params)
+
+
+@mcp.tool()
+def animate_color_fx(
+    item_id: str,
+    rainbow: bool = True,
+    rainbow_cycles: float = 1.5,
+    tint_strength: float = 0.70,
+    flicker: bool = True,
+    flicker_amplitude: float = 0.05,
+    flicker_frequency: float = 2.2,
+    saturation: float = 1.3,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
+) -> str:
+    """Animate dynamic color effects (rainbow hue rotation and subtle organic luminance flicker) over time via Fusion on a clip."""
+    params: dict[str, Any] = {
+        "item_id": item_id,
+        "rainbow": rainbow_cycles if rainbow else 0.0,
+        "tint_strength": tint_strength,
+        "flicker": flicker_amplitude if flicker else 0.0,
+        "flicker_frequency": flicker_frequency,
+        "saturation": saturation,
+        "start_frame": start_frame,
+    }
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    return _result("animate_color_fx", params)
+
+
+@mcp.tool()
 def delete_clips(item_ids: list[str], ripple: bool = False, user_approved: bool = False) -> str:
     """Delete timeline items. Refuses unless the user explicitly approved this destructive action in the current conversation."""
     if not user_approved:

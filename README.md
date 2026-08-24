@@ -125,6 +125,9 @@ claude mcp add resolve-ai-bridge -- resolve-ai-bridge
 | **`split_clip`** | Razor cut clips at specific frame numbers, timecodes, or playhead position. |
 | **`animate_zoom`** | Apply keyframed zoom in/out Fusion compositions across clip ranges. |
 | **`insert_title`** | Add customizable text titles directly onto the timeline. |
+| **`keyframe_clip_saturation`** | Smoothly animate color saturation (e.g. full color to black and white) across frames. |
+| **`animate_color_fx`** | Apply animated rainbow color shifting and subtle organic luminance flicker. |
+| **`set_clip_grade`** / **`get_clip_grade`** | Control and inspect ASC-CDL saturation, gain/slope, lift/offset, and gamma/power. |
 | **`add_marker`** / **`delete_marker`** | Place and remove timeline markers with color tags. |
 | **`set_clip_property`** / **`set_clip_color`** / **`set_clip_enabled`** | Inspect and toggle clip parameters. |
 | **`render_current_timeline`** | Start background timeline export with named presets. |
