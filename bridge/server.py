@@ -395,36 +395,42 @@ def split_clip(
 @mcp.tool()
 def animate_zoom(
     item_id: str = "playhead",
-    start_zoom: float = 1.0,
-    end_zoom: float = 1.5,
+    start_zoom: Optional[float] = None,
+    end_zoom: Optional[float] = None,
+    easing: str = "smootherstep",
+    direction: str = "in",
+    preset: str = "",
     start_frame: int = 0,
     end_frame: Optional[int] = None,
+    target_center_x: float = 0.5,
+    target_center_y: float = 0.5,
     track_index: Optional[int] = None,
 ) -> str:
-    """Animate a clip's scale over time so a push-in or pull-out plays back automatically.
+    """Animate a clip's scale and framing over time (smooth zooms, punch-ins, rebounds, pull-outs).
 
-    The Edit page sizing cannot be keyframed through scripting, so this builds a
-    Fusion composition on the clip with a keyframed Transform node. start_zoom and
-    end_zoom are scale multipliers where 1.0 is original size; start_frame and
-    end_frame are offsets within the clip (frame 0 is the clip's first frame; omit
-    end_frame to run to the clip's end). Identify the clip by an id such as V1.2 or
-    leave item_id as "playhead". Read keyframes_created in the result: on builds
-    that will not keyframe from scripting it falls back to a static zoom and says
-    so. Open the Fusion page on the clip to fine-tune. For a static scale with no
-    animation, use set_clip_transform instead.
+    Supports full Zoom In and Zoom Out (`direction='out'`), all standard easing curves
+    (`linear`, `ease_in`, `cubic_in`, `ease_out`, `cubic_out`, `ease`, `cubic_ease`,
+    `circular_ease`, `rebound_in`, `rebound_out`, `elastic_out`), and automated AI presets
+    (`punch_in`, `pop_in`, `slow_push`, `dramatic`, `reveal`, `cinematic`).
     """
-    return _result(
-        "animate_zoom",
-        {
-            "item_id": item_id,
-            "start_zoom": start_zoom,
-            "end_zoom": end_zoom,
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "track_index": track_index,
-        },
-        timeout=60.0,
-    )
+    params: dict[str, Any] = {
+        "item_id": item_id,
+        "easing": easing,
+        "direction": direction,
+        "preset": preset,
+        "start_frame": start_frame,
+        "target_center_x": target_center_x,
+        "target_center_y": target_center_y,
+    }
+    if start_zoom is not None:
+        params["start_zoom"] = start_zoom
+    if end_zoom is not None:
+        params["end_zoom"] = end_zoom
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    if track_index is not None:
+        params["track_index"] = track_index
+    return _result("animate_zoom", params, timeout=60.0)
 
 
 @mcp.tool()

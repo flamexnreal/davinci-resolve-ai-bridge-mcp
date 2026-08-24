@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.7.0"
+AGENT_VERSION = "1.8.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -972,16 +972,66 @@ class ResolveOperations:
         }
 
     def _op_animate_zoom(self, params):
-        """Animate a clip's scale and framing over time using a Fusion composition with smooth Bezier easing.
+        """Animate a clip's scale and framing over time using a Fusion composition with comprehensive curve presets.
 
-        The Edit page's own Pan/Tilt/Zoom cannot be keyframed through scripting,
-        so a real animation is built in Fusion: a Transform node between the
-        clip's MediaIn and MediaOut, with its Size and Center inputs keyframed
-        using continuous cubic/quintic smootherstep easing.
+        Supports all standard video editing curves (Linear, Ease In, Quad In, Cubic In,
+        Ease Out, Quad Out, Cubic Out, Ease, Quad Ease, Cubic Ease, Circular Ease,
+        Rebound In / Anticipation, Rebound Out / Overshoot, Elastic Spring), full Zoom Out
+        direction support, and automatic AI scenario heuristics.
         """
+        import math
+
         item, info = self._resolve_one_item(params.get("item_id"), params.get("track_index"))
-        start_zoom = float(params.get("start_zoom", 1.0))
-        end_zoom = float(params.get("end_zoom", 1.5))
+        
+        # 1. Preset & Direction Resolution
+        preset = str(params.get("preset", params.get("scenario", ""))).lower().strip()
+        direction = str(params.get("direction", params.get("zoom_type", "in"))).lower().strip()
+        
+        raw_start_zoom = params.get("start_zoom")
+        raw_end_zoom = params.get("end_zoom")
+        easing = str(params.get("easing", "")).lower().strip()
+
+        # Handle Presets
+        if preset in ("punch_in", "snap_in"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.35)
+            if not easing:
+                easing = "cubic_out"
+        elif preset in ("pop_in", "rebound", "overshoot"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.38)
+            if not easing:
+                easing = "rebound_out"
+        elif preset in ("slow_push", "ken_burns"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.15)
+            if not easing:
+                easing = "linear"
+        elif preset in ("dramatic", "build_up"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.60)
+            if not easing:
+                easing = "cubic_in"
+        elif preset in ("reveal", "zoom_out") or direction in ("out", "zoom_out"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.40)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.0)
+            if not easing:
+                easing = "cubic_out"
+        elif preset in ("cinematic", "glide"):
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.25)
+            if not easing:
+                easing = "cubic_ease"
+        else:
+            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
+            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.5)
+            if not easing:
+                easing = "smootherstep"
+
+        # Explicit direction="out" override if start_zoom was default 1.0 and end_zoom was default 1.5
+        if direction in ("out", "zoom_out") and start_zoom < end_zoom:
+            start_zoom, end_zoom = end_zoom, start_zoom
+
         if start_zoom <= 0 or end_zoom <= 0:
             raise OperationError("start_zoom and end_zoom must be greater than 0 (1.0 is original size).")
 
@@ -989,7 +1039,6 @@ class ResolveOperations:
         start_cy = float(params.get("start_center_y", params.get("center_y", 0.5)))
         end_cx = float(params.get("target_center_x", params.get("target_x", 0.5)))
         end_cy = float(params.get("target_center_y", params.get("target_y", 0.5)))
-        easing = str(params.get("easing", "smootherstep")).lower()
 
         duration = int(call(item, "GetDuration", 0) or 0)
         start_frame = max(0, int(params.get("start_frame", 0) or 0))
@@ -997,19 +1046,70 @@ class ResolveOperations:
         end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
             if end_frame is None else int(end_frame)
 
+        # 2. Comprehensive Easing Function Table
         def ease_func(t):
-            t = max(0.0, min(1.0, t))
-            if easing == "linear":
-                return t
-            elif easing == "smoothstep":
-                return t * t * (3.0 - 2.0 * t)
-            elif easing in ("smootherstep", "ease_in_out", "cubic"):
-                return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
-            elif easing == "ease_in":
-                return t * t
-            elif easing == "ease_out":
-                return 1.0 - (1.0 - t) * (1.0 - t)
-            return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+            t_clamp = max(0.0, min(1.0, t))
+            
+            # Linear
+            if easing in ("linear", "none_linear"):
+                return t_clamp
+            
+            # Ease In / Quad In
+            elif easing in ("ease_in", "quad_in"):
+                return t_clamp * t_clamp
+            
+            # Cubic In
+            elif easing in ("cubic_in",):
+                return t_clamp * t_clamp * t_clamp
+            
+            # Ease Out / Quad Out
+            elif easing in ("ease_out", "quad_out"):
+                return 1.0 - (1.0 - t_clamp) * (1.0 - t_clamp)
+            
+            # Cubic Out / Snap In
+            elif easing in ("cubic_out", "snap_in", "punch_in"):
+                return 1.0 - math.pow(1.0 - t_clamp, 3)
+            
+            # Ease / Quad Ease / Ease In Out
+            elif easing in ("ease", "quad_ease", "ease_in_out", "smoothstep"):
+                return 2.0 * t_clamp * t_clamp if t_clamp < 0.5 else 1.0 - math.pow(-2.0 * t_clamp + 2.0, 2) / 2.0
+            
+            # Cubic Ease / Smootherstep
+            elif easing in ("cubic_ease", "smootherstep", "cinematic"):
+                return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
+            
+            # Circular Ease
+            elif easing in ("circular_ease", "circ_ease", "circular"):
+                return (1.0 - math.sqrt(1.0 - math.pow(2.0 * t_clamp, 2))) / 2.0 if t_clamp < 0.5 else (math.sqrt(1.0 - math.pow(-2.0 * t_clamp + 2.0, 2)) + 1.0) / 2.0
+            
+            # Rebound In (Anticipation Pullback)
+            elif easing in ("rebound_in", "back_in", "anticipation"):
+                c1 = 1.70158
+                c3 = c1 + 1.0
+                return c3 * t_clamp * t_clamp * t_clamp - c1 * t_clamp * t_clamp
+            
+            # Rebound Out (Overshoot & Settle)
+            elif easing in ("rebound_out", "back_out", "overshoot", "pop"):
+                c1 = 1.70158
+                c3 = c1 + 1.0
+                return 1.0 + c3 * math.pow(t_clamp - 1.0, 3) + c1 * math.pow(t_clamp - 1.0, 2)
+            
+            # Rebound Ease (Back In Out)
+            elif easing in ("rebound_ease", "back_ease", "back_in_out"):
+                c1 = 1.70158 * 1.525
+                return (math.pow(2.0 * t_clamp, 2) * ((c1 + 1.0) * 2.0 * t_clamp - c1)) / 2.0 if t_clamp < 0.5 else (math.pow(2.0 * t_clamp - 2.0, 2) * ((c1 + 1.0) * (t_clamp * 2.0 - 2.0) + c1) + 2.0) / 2.0
+            
+            # Elastic Out (Springy bounce)
+            elif easing in ("elastic_out", "elastic", "spring"):
+                c4 = (2.0 * math.pi) / 3.0
+                return 0.0 if t_clamp == 0 else (1.0 if t_clamp == 1 else math.pow(2.0, -10.0 * t_clamp) * math.sin((t_clamp * 10.0 - 0.75) * c4) + 1.0)
+            
+            # None / Step
+            elif easing in ("none", "step"):
+                return 1.0 if t_clamp >= 1.0 else 0.0
+            
+            # Default to smootherstep
+            return t_clamp * t_clamp * t_clamp * (t_clamp * (t_clamp * 6.0 - 15.0) + 10.0)
 
         trace = []
 
