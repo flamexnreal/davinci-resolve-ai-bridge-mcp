@@ -1,7 +1,7 @@
 # DaVinci Resolve AI Bridge
 
 
-<img width="768" height="432" alt="demo_preview" src="https://github.com/user-attachments/assets/f0d79c5c-6bbf-4558-8eeb-13a01466685a" />
+<img width="768" height="432" alt="demo_preview" src="https://github.com/user-attachments/assets/f6d7ee91-6138-42ee-b3e1-69ced3aebeb6" />
 
 [![npm version](https://img.shields.io/npm/v/davinci-resolve-ai-bridge-mcp.svg)](https://www.npmjs.com/package/davinci-resolve-ai-bridge-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
