@@ -577,6 +577,111 @@ def animate_color_fx(
 
 
 @mcp.tool()
+def apply_blur_effect(
+    item_id: str = "playhead",
+    blur_type: str = "gaussian",
+    blur_size: float = 20.0,
+    center_x: float = 0.50,
+    center_y: float = 0.50,
+    width: float = 1.0,
+    height: float = 1.0,
+    corner_radius: float = 0.0,
+    soft_edge: float = 0.015,
+    mask_shape: str = "rectangle",
+    mask_name: str = "1",
+    animate: bool = False,
+    start_blur: float = 0.0,
+    end_blur: float = 30.0,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
+    easing: str = "smootherstep",
+    reset: bool = False,
+    track_index: Optional[int] = None,
+) -> str:
+    """Apply a static or dynamic (gradual) blur effect to a full frame or masked bounding region on a timeline clip."""
+    params: dict[str, Any] = {
+        "item_id": item_id,
+        "blur_type": blur_type,
+        "blur_size": blur_size,
+        "center_x": center_x,
+        "center_y": center_y,
+        "width": width,
+        "height": height,
+        "corner_radius": corner_radius,
+        "soft_edge": soft_edge,
+        "mask_shape": mask_shape,
+        "mask_name": mask_name,
+        "animate": animate,
+        "start_blur": start_blur,
+        "end_blur": end_blur,
+        "start_frame": start_frame,
+        "easing": easing,
+        "reset": reset,
+    }
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    if track_index is not None:
+        params["track_index"] = track_index
+    return _result("apply_blur_effect", params)
+
+
+@mcp.tool()
+def apply_spotlight_mask(
+    item_id: str = "playhead",
+    center_x: float = 0.50,
+    center_y: float = 0.50,
+    radius: float = 0.20,
+    width: Optional[float] = None,
+    height: Optional[float] = None,
+    soft_edge: float = 0.08,
+    ambient_brightness: float = 0.08,
+    spotlight_gain: float = 1.0,
+    shape: str = "ellipse",
+    mask_name: str = "1",
+    keyframes: Optional[list[dict[str, Any]]] = None,
+    animate: bool = False,
+    expand: bool = False,
+    start_radius: float = 0.20,
+    end_radius: float = 2.0,
+    start_frame: int = 0,
+    end_frame: Optional[int] = None,
+    easing: str = "cubic_out",
+    reset: bool = False,
+    track_index: Optional[int] = None,
+) -> str:
+    """Apply a dynamic or static spotlight reveal mask with adjustable feathering, ambient darkness, and animated sweep keyframes."""
+    params: dict[str, Any] = {
+        "item_id": item_id,
+        "center_x": center_x,
+        "center_y": center_y,
+        "radius": radius,
+        "soft_edge": soft_edge,
+        "ambient_brightness": ambient_brightness,
+        "spotlight_gain": spotlight_gain,
+        "shape": shape,
+        "mask_name": mask_name,
+        "animate": animate,
+        "expand": expand,
+        "start_radius": start_radius,
+        "end_radius": end_radius,
+        "start_frame": start_frame,
+        "easing": easing,
+        "reset": reset,
+    }
+    if width is not None:
+        params["width"] = width
+    if height is not None:
+        params["height"] = height
+    if keyframes is not None:
+        params["keyframes"] = keyframes
+    if end_frame is not None:
+        params["end_frame"] = end_frame
+    if track_index is not None:
+        params["track_index"] = track_index
+    return _result("apply_spotlight_mask", params)
+
+
+@mcp.tool()
 def delete_clips(item_ids: list[str], ripple: bool = False, user_approved: bool = False) -> str:
     """Delete timeline items. Refuses unless the user explicitly approved this destructive action in the current conversation."""
     if not user_approved:

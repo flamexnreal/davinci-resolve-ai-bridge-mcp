@@ -42,6 +42,10 @@ Use `animate_zoom` to generate native Fusion camera keyframes directly on timeli
 - **Color Transitions**: Use `keyframe_clip_saturation` to smoothly transition clips between 100% color and black-and-white.
 - **Rainbow Cycles & Exposure Flicker**: Use `animate_color_fx` to generate continuous $360^\circ$ spectrum hue cycling and multi-harmonic organic lighting shimmer.
 
+## Spotlight & Focus Masking
+
+- **Spotlight Mask**: Use `apply_spotlight_mask` to darken the background (ambient brightness `0.0` for pure black shadow) and focus an animated, feathered spotlight circle/rectangle across key points on any timeline clip.
+
 ## Images And Overlays
 
 - Use `add_image` for any still. Do not use `append_media` for a picture; that produces a one-frame clip.

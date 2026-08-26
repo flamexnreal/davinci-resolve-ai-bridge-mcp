@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.8.1"
+AGENT_VERSION = "1.8.2"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -1671,9 +1671,459 @@ class ResolveOperations:
             "applied": True,
         }
 
+    def _op_apply_blur_effect(self, params):
+        """Apply a static or dynamic (gradual) blur effect to a full frame or masked bounding region."""
+        import math
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index"))
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        if not comp:
+            raise OperationError("Could not create or access Fusion composition on %s." % info["id"])
+
+        duration = int(call(item, "GetDuration", 0) or 0)
+        start_frame = max(0, int(params.get("start_frame", 0) or 0))
+        end_frame = params.get("end_frame")
+        end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
+            if end_frame is None else int(end_frame)
+
+        blur_type = str(params.get("blur_type", "gaussian")).lower().strip()
+        blur_size = float(params.get("blur_size", params.get("size", 20.0)))
+        
+        cx = float(params.get("center_x", params.get("x", 0.50)))
+        cy = float(params.get("center_y", params.get("y", 0.50)))
+        w = float(params.get("width", params.get("w", 1.0)))
+        h = float(params.get("height", params.get("h", 1.0)))
+        corner_radius = float(params.get("corner_radius", 0.0))
+        soft_edge = float(params.get("soft_edge", 0.015))
+        mask_shape = str(params.get("mask_shape", "rectangle")).lower().strip()
+
+        mask_name = str(params.get("mask_name", params.get("name", "1"))).strip()
+        safe_tag = "".join(c for c in mask_name if c.isalnum()) or "1"
+        blur_node_name = "AIBridgeBlur_" + safe_tag
+        mask_node_name = "AIBridgeMask_" + safe_tag
+
+        animate = bool(params.get("animate", False))
+        start_blur = float(params.get("start_blur", 0.0))
+        end_blur = float(params.get("end_blur", blur_size))
+        easing = str(params.get("easing", "smootherstep")).lower().strip()
+        ease_fn = self._build_ease_func(easing)
+
+        is_reset = bool(params.get("reset", False))
+
+        comp.Lock()
+        trace = []
+        try:
+            # Check existing tools
+            all_tools = comp.GetToolList(False) or {}
+            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
+            media_in = None
+            media_out = None
+            existing_blur_nodes = []
+
+            for t in tool_items:
+                t_name = getattr(t, "Name", str(t))
+                if t_name == "MediaIn1" or (not media_in and "MediaIn" in t_name):
+                    media_in = t
+                elif t_name == "MediaOut1" or (not media_out and "MediaOut" in t_name):
+                    media_out = t
+                elif t_name.startswith("AIBridgeBlur_") or t_name in ("FavoritesBlur", "PrivacyBlur"):
+                    existing_blur_nodes.append(t)
+
+            if is_reset:
+                # Remove all blur nodes and reconnect MediaIn1 -> MediaOut1 (or zoom)
+                lua_cleanup = []
+                for b in existing_blur_nodes:
+                    b_name = getattr(b, "Name", str(b))
+                    lua_cleanup.append("local b = comp:FindTool('%s'); if b then b:Delete() end" % b_name)
+                if media_in and media_out:
+                    lua_cleanup.append("MediaOut1:ConnectInput('Input', MediaIn1)")
+                comp.Execute("\n".join(lua_cleanup))
+                trace.append("reset all blur nodes")
+                return {
+                    "item": info["id"],
+                    "reset": True,
+                    "trace": trace,
+                    "note": "Reset and removed all blur nodes from %s." % info["id"]
+                }
+
+            # Map blur type to Fusion RegID
+            reg_id = "Blur"
+            if "defocus" in blur_type:
+                reg_id = "Defocus"
+            elif "mosaic" in blur_type or "pixel" in blur_type:
+                reg_id = "MosaicBlur"
+            elif "directional" in blur_type or "motion" in blur_type:
+                reg_id = "DirectionalBlur"
+
+            lua_lines = []
+            # Create or reuse blur tool
+            lua_lines.append("local blur = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (blur_node_name, reg_id))
+            lua_lines.append("blur:SetAttrs({TOOLS_Name = '%s'})" % blur_node_name)
+
+            # Create or reuse mask if localized
+            raw_keyframes = params.get("keyframes")
+            has_mask = (w < 0.999 or h < 0.999 or cx != 0.50 or cy != 0.50 or bool(raw_keyframes))
+            if has_mask:
+                mask_reg_id = "EllipseMask" if "ellipse" in mask_shape or "circle" in mask_shape else "RectangleMask"
+                lua_lines.append("local mask = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (mask_node_name, mask_reg_id))
+                lua_lines.append("mask:SetAttrs({TOOLS_Name = '%s'})" % mask_node_name)
+                lua_lines.append("mask.Center = {%f, %f}" % (cx, cy))
+                lua_lines.append("mask.Width = %f" % w)
+                lua_lines.append("mask.Height = %f" % h)
+                if mask_reg_id == "RectangleMask":
+                    lua_lines.append("mask.CornerRadius = %f" % corner_radius)
+                lua_lines.append("mask.SoftEdge = %f" % soft_edge)
+                lua_lines.append("blur:ConnectInput('EffectMask', mask)")
+
+            # Configure blur size or dynamic keyframes
+            raw_keyframes = params.get("keyframes")
+            if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+                sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
+                lua_lines.append("blur.XBlurSize = BezierSpline()")
+                lua_lines.append("blur.YBlurSize = BezierSpline()")
+                if has_mask:
+                    lua_lines.append("mask.Width = BezierSpline()")
+                    lua_lines.append("mask.Height = BezierSpline()")
+                    lua_lines.append("mask.Center = XYPath()")
+                    lua_lines.append("local xy = mask.Center:GetConnectedOutput():GetTool()")
+                    lua_lines.append("xy.X = BezierSpline()")
+                    lua_lines.append("xy.Y = BezierSpline()")
+
+                for i in range(len(sorted_kfs) - 1):
+                    k_curr = sorted_kfs[i]
+                    k_next = sorted_kfs[i + 1]
+                    f_start = int(k_curr.get("frame", 0))
+                    f_end = int(k_next.get("frame", f_start + 1))
+                    span = max(1, f_end - f_start)
+
+                    b_start = float(k_curr.get("blur_size", k_curr.get("size", blur_size)))
+                    b_end = float(k_next.get("blur_size", k_next.get("size", blur_size)))
+
+                    cx_start = float(k_curr.get("center_x", k_curr.get("cx", cx)))
+                    cx_end = float(k_next.get("center_x", k_next.get("cx", cx)))
+
+                    cy_start = float(k_curr.get("center_y", k_curr.get("cy", cy)))
+                    cy_end = float(k_next.get("center_y", k_next.get("cy", cy)))
+
+                    w_start = float(k_curr.get("width", k_curr.get("w", w)))
+                    w_end = float(k_next.get("width", k_next.get("w", w)))
+
+                    h_start = float(k_curr.get("height", k_curr.get("h", h)))
+                    h_end = float(k_next.get("height", k_next.get("h", h)))
+
+                    seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
+                    seg_ease_fn = self._build_ease_func(seg_easing)
+
+                    for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
+                        t = (f - f_start) / float(span)
+                        e = seg_ease_fn(t)
+                        b_val = b_start + (b_end - b_start) * e
+                        lua_lines.append("blur.XBlurSize[%f] = %f" % (float(f), b_val))
+                        lua_lines.append("blur.YBlurSize[%f] = %f" % (float(f), b_val))
+                        if has_mask:
+                            cx_val = cx_start + (cx_end - cx_start) * e
+                            cy_val = cy_start + (cy_end - cy_start) * e
+                            w_val = w_start + (w_end - w_start) * e
+                            h_val = h_start + (h_end - h_start) * e
+                            lua_lines.append("mask.Width[%f] = %f" % (float(f), w_val))
+                            lua_lines.append("mask.Height[%f] = %f" % (float(f), h_val))
+                            lua_lines.append("xy.X[%f] = %f" % (float(f), cx_val))
+                            lua_lines.append("xy.Y[%f] = %f" % (float(f), cy_val))
+                trace.append("generated multi-segment keyframe blur spline across %d waypoints" % len(sorted_kfs))
+            elif animate:
+                lua_lines.append("blur.XBlurSize = BezierSpline()")
+                lua_lines.append("blur.YBlurSize = BezierSpline()")
+                total_span = max(1, end_frame - start_frame)
+                if start_frame > 0:
+                    lua_lines.append("blur.XBlurSize[0] = %f" % start_blur)
+                    lua_lines.append("blur.YBlurSize[0] = %f" % start_blur)
+                for f in range(start_frame, end_frame + 1):
+                    t = (f - start_frame) / float(total_span)
+                    val = start_blur + (end_blur - start_blur) * ease_fn(t)
+                    lua_lines.append("blur.XBlurSize[%f] = %f" % (float(f), val))
+                    lua_lines.append("blur.YBlurSize[%f] = %f" % (float(f), val))
+                if duration and end_frame < duration - 1:
+                    lua_lines.append("blur.XBlurSize[%f] = %f" % (float(duration - 1), end_blur))
+                    lua_lines.append("blur.YBlurSize[%f] = %f" % (float(duration - 1), end_blur))
+                trace.append("animated blur %.1f -> %.1f across frames %d..%d" % (start_blur, end_blur, start_frame, end_frame))
+            else:
+                lua_lines.append("blur.XBlurSize = %f" % blur_size)
+                lua_lines.append("blur.YBlurSize = %f" % blur_size)
+                trace.append("set static blur size %.1f" % blur_size)
+
+            # Wiring: Chain with existing nodes
+            lua_lines.append('''
+                local mi = comp:FindTool("MediaIn1")
+                local mo = comp:FindTool("MediaOut1")
+                local b_fav = comp:FindTool("AIBridgeBlur_favorites")
+                local b_search = comp:FindTool("AIBridgeBlur_search")
+                local b_priv = comp:FindTool("AIBridgeBlur_privacy")
+                local zoom = comp:FindTool("AIBridgeZoom")
+                local cc = comp:FindTool("ColorCorrector1")
+
+                local prev = mi
+                if b_fav then
+                    b_fav:ConnectInput("Input", prev)
+                    prev = b_fav
+                end
+                if b_search then
+                    b_search:ConnectInput("Input", prev)
+                    prev = b_search
+                end
+                if b_priv then
+                    b_priv:ConnectInput("Input", prev)
+                    prev = b_priv
+                end
+                if zoom then
+                    zoom:ConnectInput("Input", prev)
+                    prev = zoom
+                end
+                if cc then
+                    cc:ConnectInput("Input", prev)
+                    prev = cc
+                end
+                if mo then
+                    mo:ConnectInput("Input", prev)
+                end
+            ''')
+
+            comp.Execute("\n".join(lua_lines))
+            trace.append("successfully compiled and wired %s in Fusion" % blur_node_name)
+        finally:
+            comp.Unlock()
+
+        return {
+            "item": info["id"],
+            "blur_node": blur_node_name,
+            "mask_node": mask_node_name if has_mask else None,
+            "blur_size": blur_size,
+            "animated": animate,
+            "start_blur": start_blur if animate else None,
+            "end_blur": end_blur if animate else None,
+            "start_frame": start_frame if animate else None,
+            "end_frame": end_frame if animate else None,
+            "center": [cx, cy] if has_mask else [0.5, 0.5],
+            "dimensions": [w, h] if has_mask else [1.0, 1.0],
+            "trace": trace,
+            "note": "Applied %s %s effect on %s." % ("dynamic" if animate else "static", blur_type, info["id"])
+        }
+
+    def _op_apply_spotlight_mask(self, params):
+        """Apply a dynamic or static spotlight reveal mask with adjustable feathering and ambient darkness."""
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index"))
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        if not comp:
+            raise OperationError("Could not create or access Fusion composition on %s." % info["id"])
+
+        duration = int(call(item, "GetDuration", 0) or 0)
+        start_frame = max(0, int(params.get("start_frame", 0) or 0))
+        end_frame = params.get("end_frame")
+        end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
+            if end_frame is None else int(end_frame)
+
+        cx = float(params.get("center_x", params.get("x", 0.50)))
+        cy = float(params.get("center_y", params.get("y", 0.50)))
+        radius = float(params.get("radius", params.get("size", 0.20)))
+        w = float(params.get("width", params.get("w", radius * 2 if "radius" in params or "size" in params else 0.40)))
+        h = float(params.get("height", params.get("h", radius * 2 if "radius" in params or "size" in params else 0.40)))
+        soft_edge = float(params.get("soft_edge", params.get("feather", 0.08)))
+        ambient_brightness = max(0.0, min(1.0, float(params.get("ambient_brightness", params.get("base_gain", 0.08)))))
+        spotlight_gain = float(params.get("spotlight_gain", params.get("gain", 1.0)))
+        mask_shape = str(params.get("shape", params.get("mask_shape", "ellipse"))).lower().strip()
+
+        mask_name = str(params.get("mask_name", params.get("name", "1"))).strip()
+        safe_tag = "".join(c for c in mask_name if c.isalnum()) or "1"
+        base_node_name = "AIBridgeSpotlightBase_" + safe_tag
+        mask_node_name = "AIBridgeSpotlightMask_" + safe_tag
+        merge_node_name = "AIBridgeSpotlightMerge_" + safe_tag
+        fg_gain_node_name = "AIBridgeSpotlightGain_" + safe_tag
+
+        is_reset = bool(params.get("reset", False))
+
+        comp.Lock()
+        trace = []
+        try:
+            all_tools = comp.GetToolList(False) or {}
+            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
+            media_in = None
+            media_out = None
+            existing_spotlight_nodes = []
+
+            for t in tool_items:
+                t_name = getattr(t, "Name", str(t))
+                if t_name == "MediaIn1" or (not media_in and "MediaIn" in t_name):
+                    media_in = t
+                elif t_name == "MediaOut1" or (not media_out and "MediaOut" in t_name):
+                    media_out = t
+                elif t_name.startswith("AIBridgeSpotlight"):
+                    existing_spotlight_nodes.append(t)
+
+            if is_reset:
+                lua_cleanup = []
+                for node in existing_spotlight_nodes:
+                    n_name = getattr(node, "Name", str(node))
+                    lua_cleanup.append("local n = comp:FindTool('%s'); if n then n:Delete() end" % n_name)
+                if media_in and media_out:
+                    lua_cleanup.append("MediaOut1:ConnectInput('Input', MediaIn1)")
+                comp.Execute("\n".join(lua_cleanup))
+                trace.append("reset all spotlight mask nodes")
+                return {
+                    "item": info["id"],
+                    "reset": True,
+                    "trace": trace,
+                    "note": "Reset and removed all spotlight mask nodes from %s." % info["id"]
+                }
+
+            lua_lines = []
+            # 1. Base Dark Layer (BrightnessContrast)
+            lua_lines.append("local base = comp:FindTool('%s') or comp:AddTool('BrightnessContrast', -32768, -32768)" % base_node_name)
+            lua_lines.append("base:SetAttrs({TOOLS_Name = '%s'})" % base_node_name)
+            lua_lines.append("base.Gain = %f" % ambient_brightness)
+
+            # 2. Foreground Gain Layer (if spotlight_gain != 1.0)
+            use_fg_gain = (abs(spotlight_gain - 1.0) > 0.001)
+            if use_fg_gain:
+                lua_lines.append("local fg_gain = comp:FindTool('%s') or comp:AddTool('BrightnessContrast', -32768, -32768)" % fg_gain_node_name)
+                lua_lines.append("fg_gain:SetAttrs({TOOLS_Name = '%s'})" % fg_gain_node_name)
+                lua_lines.append("fg_gain.Gain = %f" % spotlight_gain)
+
+            # 3. Spotlight Mask (EllipseMask or RectangleMask)
+            mask_reg_id = "RectangleMask" if "rect" in mask_shape else "EllipseMask"
+            lua_lines.append("local mask = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (mask_node_name, mask_reg_id))
+            lua_lines.append("mask:SetAttrs({TOOLS_Name = '%s'})" % mask_node_name)
+            lua_lines.append("mask.Center = {%f, %f}" % (cx, cy))
+            lua_lines.append("mask.Width = %f" % w)
+            lua_lines.append("mask.Height = %f" % h)
+            lua_lines.append("mask.SoftEdge = %f" % soft_edge)
+
+            # 4. Merge Node
+            lua_lines.append("local merge = comp:FindTool('%s') or comp:AddTool('Merge', -32768, -32768)" % merge_node_name)
+            lua_lines.append("merge:SetAttrs({TOOLS_Name = '%s'})" % merge_node_name)
+
+            # 5. Keyframing
+            raw_keyframes = params.get("keyframes")
+            if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+                sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
+                lua_lines.append("mask.Width = BezierSpline()")
+                lua_lines.append("mask.Height = BezierSpline()")
+                lua_lines.append("mask.Center = XYPath()")
+                lua_lines.append("local xy = mask.Center:GetConnectedOutput():GetTool()")
+                lua_lines.append("xy.X = BezierSpline()")
+                lua_lines.append("xy.Y = BezierSpline()")
+
+                for i in range(len(sorted_kfs) - 1):
+                    k_curr = sorted_kfs[i]
+                    k_next = sorted_kfs[i + 1]
+                    f_start = int(k_curr.get("frame", 0))
+                    f_end = int(k_next.get("frame", f_start + 1))
+                    span = max(1, f_end - f_start)
+
+                    cx_start = float(k_curr.get("x", k_curr.get("center_x", cx)))
+                    cy_start = float(k_curr.get("y", k_curr.get("center_y", cy)))
+                    cx_end = float(k_next.get("x", k_next.get("center_x", cx)))
+                    cy_end = float(k_next.get("y", k_next.get("center_y", cy)))
+
+                    rad_start = float(k_curr.get("radius", k_curr.get("size", radius)))
+                    rad_end = float(k_next.get("radius", k_next.get("size", radius)))
+                    w_start = float(k_curr.get("width", k_curr.get("w", rad_start * 2)))
+                    w_end = float(k_next.get("width", k_next.get("w", rad_end * 2)))
+                    h_start = float(k_curr.get("height", k_curr.get("h", rad_start * 2)))
+                    h_end = float(k_next.get("height", k_next.get("h", rad_end * 2)))
+
+                    seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
+                    seg_ease_fn = self._build_ease_func(seg_easing)
+
+                    for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
+                        t = (f - f_start) / float(span)
+                        e = seg_ease_fn(t)
+                        cx_val = cx_start + (cx_end - cx_start) * e
+                        cy_val = cy_start + (cy_end - cy_start) * e
+                        w_val = w_start + (w_end - w_start) * e
+                        h_val = h_start + (h_end - h_start) * e
+                        lua_lines.append("mask.Width[%f] = %f" % (float(f), w_val))
+                        lua_lines.append("mask.Height[%f] = %f" % (float(f), h_val))
+                        lua_lines.append("xy.X[%f] = %f" % (float(f), cx_val))
+                        lua_lines.append("xy.Y[%f] = %f" % (float(f), cy_val))
+                trace.append("animated spotlight mask across %d keyframe waypoints" % len(sorted_kfs))
+            elif params.get("animate"):
+                animate_expand = bool(params.get("expand", False))
+                start_rad = float(params.get("start_radius", radius))
+                end_rad = float(params.get("end_radius", 2.0 if animate_expand else radius))
+                easing = str(params.get("easing", "cubic_out")).lower().strip()
+                ease_fn = self._build_ease_func(easing)
+                total_span = max(1, end_frame - start_frame)
+
+                lua_lines.append("mask.Width = BezierSpline()")
+                lua_lines.append("mask.Height = BezierSpline()")
+                for f in range(start_frame, end_frame + 1):
+                    t = (f - start_frame) / float(total_span)
+                    r_val = start_rad + (end_rad - start_rad) * ease_fn(t)
+                    lua_lines.append("mask.Width[%f] = %f" % (float(f), r_val * 2))
+                    lua_lines.append("mask.Height[%f] = %f" % (float(f), r_val * 2))
+                trace.append("animated spotlight radius %.2f -> %.2f across frames %d..%d" % (start_rad, end_rad, start_frame, end_frame))
+
+            # Wiring:
+            # MediaIn1 -> base -> merge.Background
+            # MediaIn1 -> (fg_gain) -> merge.Foreground
+            # mask -> merge.EffectMask
+            # merge -> MediaOut1
+            lua_lines.append('''
+                local mi = comp:FindTool("MediaIn1")
+                local mo = comp:FindTool("MediaOut1")
+                local base = comp:FindTool("%s")
+                local mask = comp:FindTool("%s")
+                local merge = comp:FindTool("%s")
+                local fg_gain = comp:FindTool("%s")
+
+                if mi and base then
+                    base:ConnectInput("Input", mi)
+                end
+                if base and merge then
+                    merge:ConnectInput("Background", base)
+                end
+                if mi and merge then
+                    if fg_gain then
+                        fg_gain:ConnectInput("Input", mi)
+                        merge:ConnectInput("Foreground", fg_gain)
+                    else
+                        merge:ConnectInput("Foreground", mi)
+                    end
+                end
+                if mask and merge then
+                    merge:ConnectInput("EffectMask", mask)
+                end
+                if merge and mo then
+                    mo:ConnectInput("Input", merge)
+                end
+            ''' % (base_node_name, mask_node_name, merge_node_name, fg_gain_node_name))
+
+            comp.Execute("\n".join(lua_lines))
+            trace.append("successfully compiled and wired spotlight mask graph in Fusion")
+        finally:
+            comp.Unlock()
+
+        return {
+            "item": info["id"],
+            "base_node": base_node_name,
+            "mask_node": mask_node_name,
+            "merge_node": merge_node_name,
+            "ambient_brightness": ambient_brightness,
+            "spotlight_gain": spotlight_gain,
+            "center": [cx, cy],
+            "dimensions": [w, h],
+            "soft_edge": soft_edge,
+            "trace": trace,
+            "note": "Applied spotlight reveal mask to %s." % info["id"]
+        }
+
     def _op_inspect_fusion(self, params):
         item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
         comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
         if not comp:
             return {"error": "No Fusion composition found on clip"}
         
@@ -2282,6 +2732,9 @@ class ResolveOperations:
             "set_clip_grade": self._op_set_clip_grade,
             "keyframe_clip_saturation": self._op_keyframe_clip_saturation,
             "animate_color_fx": self._op_animate_color_fx,
+            "apply_blur_effect": self._op_apply_blur_effect,
+            "apply_spotlight_mask": self._op_apply_spotlight_mask,
+            "apply_mask": self._op_apply_spotlight_mask,
             "inspect_fusion": self._op_inspect_fusion,
             "delete_clips": self._op_delete_clips,
             "save_project": self._op_save_project,
