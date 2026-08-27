@@ -8,10 +8,12 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![DaVinci Resolve Free & Studio](https://img.shields.io/badge/DaVinci%20Resolve-Free%20%26%20Studio-brightgreen.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
 
-Resolve AI Bridge is an open-source local Model Context Protocol (MCP) bridge that lets AI coding assistants (Claude, Claude Code, Antigravity, Cursor, Windsurf, Codex, VS Code) inspect, analyze, and edit projects open in DaVinci Resolve (Free and Studio).
+Resolve AI Bridge is an ultra-lightweight Model Context Protocol (MCP) bridge that lets AI coding assistants (Claude, Claude Code, Antigravity, Cursor, Windsurf, Codex, VS Code) inspect, analyze, and edit projects open in DaVinci Resolve (Free and Studio).
 
-> ### 100% Free — No $295 Studio License Required
-> Other tools force you to buy **DaVinci Resolve Studio ($295)**. Resolve AI Bridge gives you **full feature parity on the free version** with zero paywalls.
+> ### 100% Free, Lighter & Faster
+> * **No $295 Studio Paywall**: Full feature parity on **DaVinci Resolve Free** with zero restrictions.
+> * **Significantly Lighter & Faster**: Takes up far less storage and starts up noticeably faster than other DaVinci Resolve MCP servers, with zero dependency bloat.
+> * **Minimal Token Context**: Compact tool schema so your AI responds immediately without eating your context window.
 
 **Prerequisite:** Requires Python 3.10 or newer (download from [python.org/downloads](https://www.python.org/downloads/) if not already on your computer).
 
@@ -112,6 +114,28 @@ claude mcp add resolve-ai-bridge -- resolve-ai-bridge
 
 ---
 
+## Motion Graphics & Remotion
+
+Remotion is a framework that lets developers and AI agents create video animations and motion graphics programmatically using React code.
+
+- **React-Based Video & 3D Mockups**:
+  Build custom motion graphics, animated 3D laptop/device mockups, and dynamic lower thirds in React. AI coding agents can write the code, render the video clip, and place it directly onto the DaVinci Resolve timeline using `append_media`.
+- **Kinetic Typography & Bouncy Text**:
+  Generate modern word-by-word spring reveals, letter-by-letter waterfall bounce animations, and contrast font pairings that land in sync with dialogue.
+- **Smooth Zooms & Camera Moves**:
+  Create natural, smooth camera glides and keyframed punch-ins with zero stepped cuts or black flickers on both Free and Studio timelines.
+- **Extra Visual Effects & Callouts**:
+  Floating glass magnifier cards (`magnifier-callout` skill), spotlight blur masks, saturation transitions, and animated color shifts.
+
+```bash
+# Add Remotion AI agent skills
+npx -y skills@latest add remotion-dev/skills -g -y
+```
+
+See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
+
+---
+
 ## Available MCP Tools
 
 | Tool | Description |
@@ -134,26 +158,6 @@ claude mcp add resolve-ai-bridge -- resolve-ai-bridge
 | **`add_marker`** / **`delete_marker`** | Place and remove timeline markers with color tags. |
 | **`set_clip_property`** / **`set_clip_color`** / **`set_clip_enabled`** | Inspect and toggle clip parameters. |
 | **`render_current_timeline`** | Start background timeline export with named presets. |
-
----
-
-## Motion Graphics, Magnifiers & Remotion
-
-- **Floating Magnifier Callouts (`magnifier-callout` skill)**:
-  AI agents can generate luxury rounded-rectangle magnifier cards that zoom into buttons, search bars, and code lines at $1.8\times – 2.5\times$ magnification while smoothly blurring the full-scale background with Gaussian blur ($\sigma=45\text{px}$) and soft drop shadows.
-- **Subpixel Lanczos Camera Keyframing**:
-  Bypasses DaVinci Resolve Free's locked Edit-page spline scripting by generating continuous quintic smootherstep camera glides ($E(t) = 6t^5 - 15t^4 + 10t^3$) with zero stepped cuts and zero 1ms black flickers.
-- **VAD Speech Clustering & Frame-Locked Captions**:
-  Automatic 16-bit PCM normalization, acoustic energy peak alignment, and `-160ms` anticipatory lead for typography that lands synchronously with spoken words.
-- **Remotion React-Based Video**:
-  For programmatic motion graphics, lower thirds, and video overlays, AI coding agents can generate React components, render them, and place them directly onto the DaVinci Resolve timeline using `append_media`.
-
-```bash
-# Add Remotion AI agent skills
-npx -y skills@latest add remotion-dev/skills -g -y
-```
-
-See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
 
 ---
 
