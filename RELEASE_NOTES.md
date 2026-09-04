@@ -1,5 +1,19 @@
 # Release Notes
 
+## v1.9.0 — Compound Clips and Clip Speed Changes
+
+This release introduces two major timeline editing capabilities for DaVinci Resolve (Free and Studio):
+
+### Compound Clips
+- `create_compound_clip`: Group one or more timeline items (`V1.1`, `A1.1`, or `item_id="playhead"`) into a clean, single compound clip container.
+- Keeps original source in/out cuts, audio sync, and Edit-page sizing intact.
+- Works 100% on free DaVinci Resolve via native timeline compound clip creation.
+
+### Clip Speed and Slow Motion
+- `change_clip_speed`: Adjust playback speed for any video clip with a single command.
+- Supports speed multipliers (e.g. `speed=0.75` for 75% speed / 25% slower), slowdown percentages (`slow_down_percent=25.0`), speed-ups, and reverse playback.
+- Automatically enables smooth subframe interpolation for fluid slow-motion playback.
+
 ## v1.2.0 — Reliable launcher, and real timeline editing
 
 This release makes the one-click launcher dependable and gives your AI three things it could not do before: **scale** the clips already on your timeline, **animate** that scale over time, and **cut** clips in two. It also tidies the Workspace > Scripts menu so only the bridge's own entries remain.

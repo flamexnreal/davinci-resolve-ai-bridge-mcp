@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 
-AGENT_VERSION = "1.8.2"
+AGENT_VERSION = "1.9.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -284,6 +284,13 @@ class ResolveOperations:
         found = []
         missing = []
         for identifier in wanted:
+            token = identifier.strip().lower()
+            if token in ("playhead", "current", "under_playhead", "at_playhead"):
+                try:
+                    found.append(self._resolve_one_item(identifier))
+                    continue
+                except Exception:
+                    pass
             matches = [
                 (item, info)
                 for item, info in all_items
@@ -331,10 +338,20 @@ class ResolveOperations:
 
         timeline = self._timeline()
         frame = self._playhead_frame(timeline)
-        want_track = int(track_hint) if track_hint else None
+        want_track = None
+        want_type = "video"
+        if track_hint is not None:
+            hint_str = str(track_hint).strip().lower()
+            if hint_str in ("audio", "video"):
+                want_type = hint_str
+            elif hint_str.isdigit():
+                want_track = int(hint_str)
+            elif isinstance(track_hint, int):
+                want_track = int(track_hint)
+
         best = None
         for item, info in self._timeline_items():
-            if info.get("track_type") != "video":
+            if want_type and info.get("track_type") != want_type:
                 continue
             start = info.get("start")
             end = info.get("end")
@@ -343,13 +360,13 @@ class ResolveOperations:
             if int(start) <= frame <= int(end):
                 if want_track is not None and info.get("track_index") != want_track:
                     continue
-                # Prefer the highest video track (topmost layer) at the playhead.
+                # Prefer the highest track (topmost layer) at the playhead.
                 if best is None or info.get("track_index", 0) > best[1].get("track_index", 0):
                     best = (item, info)
         if best is None:
             raise OperationError(
-                "No video clip sits under the playhead (timeline frame %d). Move the playhead "
-                "onto a clip, or pass an explicit item_id from timeline_overview." % frame
+                "No %s clip sits under the playhead (timeline frame %d). Move the playhead "
+                "onto a clip, or pass an explicit item_id from timeline_overview." % (want_type or "timeline", frame)
             )
         return best
 
@@ -653,15 +670,23 @@ class ResolveOperations:
             items = self._find_media_items(media_ids)
 
         timeline = self._timeline()
+        track_type = str(params.get("track_type", "audio" if int(params.get("media_type", 1)) == 2 else "video")).lower()
+        media_type = int(params.get("media_type", 2 if track_type == "audio" else 1))
         track_index = params.get("track_index")
         if track_index is not None:
-            track_index = self._ensure_video_track(
-                timeline, track_index, bool(params.get("create_track", True))
-            )
+            if track_type == "audio" or media_type == 2:
+                count = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
+                if int(track_index) > count:
+                    for _ in range(int(track_index) - count):
+                        call(timeline, "AddTrack", False, "audio")
+            else:
+                track_index = self._ensure_video_track(
+                    timeline, track_index, bool(params.get("create_track", True))
+                )
         record_frame = params.get("record_frame")
 
         payload = items
-        if track_index is not None or record_frame is not None:
+        if track_index is not None or record_frame is not None or params.get("start_frame") is not None:
             payload = []
             for item in items:
                 clip_info = {"mediaPoolItem": item}
@@ -669,13 +694,24 @@ class ResolveOperations:
                     clip_info["trackIndex"] = int(track_index)
                 if record_frame is not None:
                     clip_info["recordFrame"] = int(record_frame)
+                clip_info["mediaType"] = media_type
                 frames = (call(item, "GetClipProperty", {}) or {}).get("Frames")
                 try:
                     total = int(frames)
                 except (TypeError, ValueError):
                     total = 0
-                if total > 1:
-                    clip_info.update({"startFrame": 0, "endFrame": total - 1})
+                sf = int(params.get("start_frame", 0) or 0)
+                ef = params.get("end_frame")
+                if ef is not None:
+                    ef = int(ef)
+                    sub = call(item, "CreateSubClip", None, f"sub_{sf}_{ef}", sf, ef)
+                    if sub is not None:
+                        clip_info["mediaPoolItem"] = sub
+                    else:
+                        clip_info.update({"startFrame": sf, "endFrame": ef})
+                elif total > 1:
+                    ef = total - 1
+                    clip_info.update({"startFrame": sf, "endFrame": ef})
                 payload.append(clip_info)
 
         created = self._media_pool().AppendToTimeline(payload) or []
@@ -2170,9 +2206,9 @@ class ResolveOperations:
                     except Exception:
                         pass
 
-                # Get current input values for Transform and MediaIn
+                # Get current input values for Transform, MediaIn, and TimeSpeed
                 val_info = {}
-                for inp_key in ("Size", "Center", "GlobalIn", "GlobalOut", "HoldFirstFrame", "HoldLastFrame"):
+                for inp_key in ("Size", "Center", "GlobalIn", "GlobalOut", "HoldFirstFrame", "HoldLastFrame", "Speed", "InterpolateBetweenFrames"):
                     try:
                         v = tool.GetInput(inp_key, 8.0)
                         if v is not None:
@@ -2412,56 +2448,73 @@ class ResolveOperations:
         min_silence_duration = float(params.get("min_silence_duration", 0.3))
         track_index = int(params.get("track_index", 1)) if "track_index" in params else None
 
-        # 1. Determine active playhead frame
+        # 1. Determine target item or active playhead frame
+        requested_item_id = params.get("item_id")
+        if requested_item_id:
+            target_item, _ = self._find_timeline_items([requested_item_id])[0]
+            target_track_type = "audio"
+        else:
+            target_item = None
+
         requested_tc = params.get("timecode")
         if requested_tc:
             timeline.SetCurrentTimecode(str(requested_tc).strip())
-        current_frame = self._current_marker_frame(timeline)
+        current_frame = self._playhead_frame(timeline)
         current_tc = call(timeline, "GetCurrentTimecode", "00:00:00:00")
 
         # 2. Find target audio or video clip on timeline covering playhead
-        target_item = None
-        target_track_type = "audio"
-        audio_tracks = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
-        video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
-
-        # Check audio tracks first
-        track_search_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
-        for a_idx in track_search_range:
-            items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
-            for item in items:
-                s = call(item, "GetStart", None)
-                e = call(item, "GetEnd", None)
-                if s is not None and e is not None and s <= current_frame < e:
-                    target_item = item
-                    target_track_type = "audio"
-                    break
-            if target_item is not None:
-                break
-
-        # If not under playhead in audio tracks, check video tracks
         if target_item is None:
-            v_search_range = [track_index] if (track_index and 1 <= track_index <= video_tracks) else range(1, video_tracks + 1)
-            for v_idx in v_search_range:
-                items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
+            target_track_type = "audio"
+            audio_tracks = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
+            video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
+
+            # Check audio tracks first
+            track_search_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
+            for a_idx in track_search_range:
+                items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
                 for item in items:
                     s = call(item, "GetStart", None)
                     e = call(item, "GetEnd", None)
                     if s is not None and e is not None and s <= current_frame < e:
-                        target_item = item
-                        target_track_type = "video"
-                        break
+                        # Ensure media pool item has accessible file on disk
+                        mp = item.GetMediaPoolItem()
+                        fp = (call(mp, "GetClipProperty", {}) or {}).get("File Path")
+                        if fp and Path(fp).exists():
+                            target_item = item
+                            target_track_type = "audio"
+                            break
                 if target_item is not None:
                     break
 
-        # Fallback to first available clip if playhead is on an empty gap
-        if target_item is None:
-            for a_idx in range(1, audio_tracks + 1):
-                items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
-                if items:
-                    target_item = items[0]
-                    target_track_type = "audio"
-                    break
+            # If not under playhead in audio tracks, check video tracks
+            if target_item is None:
+                v_search_range = [track_index] if (track_index and 1 <= track_index <= video_tracks) else range(1, video_tracks + 1)
+                for v_idx in v_search_range:
+                    items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
+                    for item in items:
+                        s = call(item, "GetStart", None)
+                        e = call(item, "GetEnd", None)
+                        if s is not None and e is not None and s <= current_frame < e:
+                            target_item = item
+                            target_track_type = "video"
+                            break
+                    if target_item is not None:
+                        break
+
+            # Fallback to first available clip with media on disk
+            if target_item is None:
+                a_fallback_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
+                for a_idx in a_fallback_range:
+                    items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
+                    for it in items:
+                        mp = it.GetMediaPoolItem()
+                        fp = (call(mp, "GetClipProperty", {}) or {}).get("File Path")
+                        if fp and Path(fp).exists():
+                            target_item = it
+                            target_track_type = "audio"
+                            break
+                    if target_item is not None:
+                        break
             if target_item is None:
                 for v_idx in range(1, video_tracks + 1):
                     items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
@@ -2700,6 +2753,208 @@ class ResolveOperations:
 
         raise OperationError("Unknown audio action '%s'. Valid actions: analyze, silence_cuts, energy_envelope, onsets, vad_clusters, export_slice" % action)
 
+    def _op_change_clip_speed(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index") or "video")
+
+        if info.get("track_type") == "audio":
+            raise OperationError(
+                "change_clip_speed currently supports video clips. DaVinci Resolve does not process "
+                "audio in Fusion compositions; audio speed changes must be made via Fairlight or clip pitch/retime."
+            )
+
+        speed = params.get("speed")
+        if speed is None:
+            speed = params.get("speed_multiplier")
+        if speed is None and params.get("speed_percent") is not None:
+            try:
+                speed = float(params["speed_percent"]) / 100.0
+            except (ValueError, TypeError):
+                pass
+        if speed is None and params.get("slow_down_percent") is not None:
+            try:
+                speed = 1.0 - (float(params["slow_down_percent"]) / 100.0)
+            except (ValueError, TypeError):
+                pass
+        if speed is None and params.get("speed_up_percent") is not None:
+            try:
+                speed = 1.0 + (float(params["speed_up_percent"]) / 100.0)
+            except (ValueError, TypeError):
+                pass
+
+        if speed is None:
+            raise OperationError("speed (e.g. 0.75), speed_percent (e.g. 75), or slow_down_percent (e.g. 25) is required.")
+
+        try:
+            speed = float(speed)
+        except (ValueError, TypeError):
+            raise OperationError("Invalid speed value: %s" % speed)
+
+        if speed <= 0.0:
+            raise OperationError("speed must be a positive number greater than 0.")
+
+        method = str(params.get("method", "fusion")).lower()
+        reverse = bool(params.get("reverse", False))
+
+        if method in ("clip_attributes", "media_pool", "fps"):
+            mpi = item.GetMediaPoolItem()
+            if not mpi:
+                raise OperationError("Clip %s has no Media Pool item to modify frame rate." % info.get("id"))
+            fps = self._project_rate()
+            # In Resolve clip attributes, conforming higher FPS footage to timeline rate produces slow motion (e.g. 24 / 0.75 = 32 fps).
+            new_fps = round(fps / speed, 3)
+            ok = call(mpi, "SetClipProperty", False, "FPS", str(new_fps))
+            if not ok:
+                raise OperationError("Resolve refused to update clip FPS to %s." % new_fps)
+            return {
+                "item_id": info["id"],
+                "name": info.get("name"),
+                "method": "clip_attributes_fps",
+                "speed": speed,
+                "speed_percent": round(speed * 100.0, 1),
+                "timeline_fps": fps,
+                "clip_fps": new_fps,
+            }
+
+        # Default method: Fusion native TimeSpeed
+        comp = item.GetFusionCompByIndex(1)
+        if not comp:
+            comp = item.AddFusionComp()
+        if not comp:
+            raise OperationError("Could not access or create Fusion composition for clip %s." % info.get("id"))
+
+        comp.Lock()
+        try:
+            media_in = comp.FindTool("MediaIn1")
+            media_out = comp.FindTool("MediaOut1")
+            if not media_in or not media_out:
+                tools = comp.GetToolList(False) or {}
+                tool_list = list(tools.values()) if isinstance(tools, dict) else list(tools)
+                for t in tool_list:
+                    reg_id = str(call(t, "GetAttrs", "", "TOOLS_RegID"))
+                    if reg_id == "MediaIn":
+                        media_in = t
+                    elif reg_id == "MediaOut":
+                        media_out = t
+
+            if not media_in or not media_out:
+                raise OperationError("Fusion composition for clip %s lacks MediaIn/MediaOut nodes." % info.get("id"))
+
+            ts = comp.FindTool("TimeSpeed1")
+            if not ts:
+                tools = comp.GetToolList(False) or {}
+                tool_list = list(tools.values()) if isinstance(tools, dict) else list(tools)
+                for t in tool_list:
+                    if str(call(t, "GetAttrs", "", "TOOLS_RegID")) == "TimeSpeed":
+                        ts = t
+                        break
+
+            if abs(speed - 1.0) < 1e-5 and not reverse:
+                if ts:
+                    media_out.ConnectInput("Input", media_in)
+                    ts.Delete()
+                tool_name = None
+            else:
+                if not ts:
+                    ts = comp.AddTool("TimeSpeed")
+                    if not ts:
+                        raise OperationError("Could not create TimeSpeed tool in Fusion composition.")
+                    # Wire non-destructively: connect ts between current media_out input source and media_out
+                    current_out_src = None
+                    try:
+                        out_inp = media_out.GetInput("Input")
+                        if out_inp:
+                            conn = out_inp.GetConnectedOutput()
+                            if conn:
+                                current_out_src = conn.GetTool()
+                    except Exception:
+                        pass
+                    if current_out_src and current_out_src != ts:
+                        ts.ConnectInput("Input", current_out_src)
+                    else:
+                        ts.ConnectInput("Input", media_in)
+                    media_out.ConnectInput("Input", ts)
+                else:
+                    # ts already exists, ensure it's connected
+                    ts_in = None
+                    try:
+                        inp = ts.GetInput("Input")
+                        if inp and inp.GetConnectedOutput():
+                            ts_in = inp.GetConnectedOutput().GetTool()
+                    except Exception:
+                        pass
+                    if not ts_in:
+                        ts.ConnectInput("Input", media_in)
+                    media_out.ConnectInput("Input", ts)
+
+                effective_speed = -speed if reverse else speed
+                ts.SetInput("Speed", float(effective_speed))
+
+                interpolate = bool(params.get("interpolate_frames", True))
+                try:
+                    ts.SetInput("InterpolateBetweenFrames", 1.0 if interpolate else 0.0)
+                except Exception:
+                    pass
+                tool_name = getattr(ts, "Name", "TimeSpeed1")
+        finally:
+            comp.Unlock()
+
+        slow_down = round((1.0 - speed) * 100.0, 1) if speed < 1.0 else 0.0
+        speed_up = round((speed - 1.0) * 100.0, 1) if speed > 1.0 else 0.0
+
+        return {
+            "item_id": info["id"],
+            "name": info.get("name"),
+            "method": "fusion_timespeed",
+            "speed": speed,
+            "speed_percent": round(speed * 100.0, 1),
+            "slow_down_percent": slow_down,
+            "speed_up_percent": speed_up,
+            "reverse": reverse,
+            "tool": tool_name,
+            "interpolate_frames": bool(params.get("interpolate_frames", True)),
+        }
+
+    def _op_create_compound_clip(self, params):
+        timeline = self._timeline()
+        ids = params.get("item_ids")
+        if not ids:
+            item_id = params.get("item_id")
+            if item_id:
+                ids = [item_id]
+        if not ids:
+            ids = ["playhead"]
+
+        targets = self._find_timeline_items(ids)
+        items = [item for item, _ in targets]
+
+        clip_info = {}
+        name = params.get("name")
+        if name:
+            clip_info["name"] = str(name).strip()
+        tc = params.get("start_timecode")
+        if tc:
+            clip_info["startTimecode"] = str(tc).strip()
+
+        created_item = timeline.CreateCompoundClip(items, clip_info) if clip_info else timeline.CreateCompoundClip(items)
+        if not created_item:
+            raise OperationError("Resolve could not create compound clip from the specified items.")
+
+        new_id = self._item_id_after_rebuild(timeline, created_item) if not isinstance(created_item, bool) else None
+        if not new_id and targets:
+            new_id = targets[0][1].get("id")
+
+        return {
+            "created_compound_clip": {
+                "id": new_id,
+                "name": str(call(created_item, "GetName", clip_info.get("name", "Compound Clip"))) if not isinstance(created_item, bool) else clip_info.get("name", "Compound Clip"),
+                "duration": int(call(created_item, "GetDuration", 0) or 0) if not isinstance(created_item, bool) else 0,
+                "start_frame": int(call(created_item, "GetStart", 0) or 0) if not isinstance(created_item, bool) else 0,
+                "end_frame": int(call(created_item, "GetEnd", 0) or 0) if not isinstance(created_item, bool) else 0,
+                "unique_id": str(call(created_item, "GetUniqueId", "")) if not isinstance(created_item, bool) else "",
+            },
+            "source_items": [info["id"] for _, info in targets],
+        }
+
     # ------------------------------------------------------------- dispatch
 
     def handlers(self):
@@ -2742,6 +2997,8 @@ class ResolveOperations:
             "render_current_timeline": self._op_render_current_timeline,
             "timeline_frame": self._op_timeline_frame,
             "timeline_audio": self._op_timeline_audio,
+            "create_compound_clip": self._op_create_compound_clip,
+            "change_clip_speed": self._op_change_clip_speed,
         }
 
     def dispatch(self, operation, params=None):

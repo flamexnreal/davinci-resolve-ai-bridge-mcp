@@ -157,6 +157,8 @@ See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
 | **`set_clip_grade`** / **`get_clip_grade`** | Control and inspect ASC-CDL saturation, gain/slope, lift/offset, and gamma/power. |
 | **`add_marker`** / **`delete_marker`** | Place and remove timeline markers with color tags. |
 | **`set_clip_property`** / **`set_clip_color`** / **`set_clip_enabled`** | Inspect and toggle clip parameters. |
+| **`create_compound_clip`** | Combine one or more timeline clips into a single compound clip container. |
+| **`change_clip_speed`** | Adjust clip playback speed (slow down / speed up) via native Fusion TimeSpeed nodes or clip FPS attributes. |
 | **`render_current_timeline`** | Start background timeline export with named presets. |
 
 ---

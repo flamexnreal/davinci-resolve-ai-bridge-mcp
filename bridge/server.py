@@ -32,8 +32,9 @@ mcp = FastMCP(
         "Inspect before editing. Call resolve_status, then timeline_overview. "
         "Refer to timeline items by ids such as V1.2, or pass item_id='playhead'. "
         "Verify after each change. Use add_image for stills and set_clip_transform "
-        "to position them, animate_zoom for a scale that moves over time, and "
-        "split_clip to cut a clip in two. "
+        "to position them, animate_zoom for a scale that moves over time, "
+        "split_clip to cut a clip in two, create_compound_clip to group clips into "
+        "a compound container, and change_clip_speed for slow motion or speed changes. "
         "Never delete clips or start a render without explicit user approval."
     ),
 )
@@ -127,6 +128,7 @@ def timeline_frame(
 def timeline_audio(
     action: str = "analyze",
     track_index: int = 1,
+    item_id: Optional[str] = None,
     silence_threshold_db: float = -40.0,
     min_silence_duration: float = 0.3,
 ) -> str:
@@ -143,6 +145,7 @@ def timeline_audio(
         {
             "action": action,
             "track_index": track_index,
+            "item_id": item_id,
             "silence_threshold_db": silence_threshold_db,
             "min_silence_duration": min_silence_duration,
         },
@@ -436,6 +439,70 @@ def animate_zoom(
     if track_index is not None:
         params["track_index"] = track_index
     return _result("animate_zoom", params, timeout=60.0)
+
+
+@mcp.tool()
+def change_clip_speed(
+    item_id: Optional[str] = "playhead",
+    speed: Optional[float] = None,
+    speed_percent: Optional[float] = None,
+    slow_down_percent: Optional[float] = None,
+    speed_up_percent: Optional[float] = None,
+    interpolate_frames: bool = True,
+    reverse: bool = False,
+    method: str = "fusion",
+) -> str:
+    """Change the playback speed of a timeline clip (e.g. slow motion or speed ramp).
+
+    Args:
+        item_id: Target clip id (e.g. 'V1.1', 'playhead', or clip name). Defaults to active clip under playhead.
+        speed: Speed multiplier (e.g. 0.75 for 75% speed / 25% slower, 0.5 for half-speed, 2.0 for 2x speed, 1.0 for normal).
+        speed_percent: Speed as a percentage (e.g. 75.0 for 75% speed).
+        slow_down_percent: Slowdown percentage (e.g. 25.0 to slow down by 25% -> 0.75x speed).
+        speed_up_percent: Speedup percentage (e.g. 50.0 to speed up by 50% -> 1.5x speed).
+        interpolate_frames: Whether to enable smooth frame interpolation/blending (default True).
+        reverse: Whether to reverse clip playback (default False).
+        method: Implementation method: 'fusion' (native TimeSpeed node, default) or 'clip_attributes' (MediaPoolItem FPS).
+    """
+    return _result(
+        "change_clip_speed",
+        {
+            "item_id": item_id,
+            "speed": speed,
+            "speed_percent": speed_percent,
+            "slow_down_percent": slow_down_percent,
+            "speed_up_percent": speed_up_percent,
+            "interpolate_frames": interpolate_frames,
+            "reverse": reverse,
+            "method": method,
+        },
+    )
+
+
+@mcp.tool()
+def create_compound_clip(
+    item_ids: Optional[list[str]] = None,
+    item_id: Optional[str] = "playhead",
+    name: Optional[str] = None,
+    start_timecode: Optional[str] = None,
+) -> str:
+    """Create a compound clip combining one or more timeline items into a single container clip.
+
+    Args:
+        item_ids: List of timeline item ids to combine (e.g. ['V1.1', 'A1.1'] or ['A1.1']). If omitted, item_id is used.
+        item_id: Single timeline item id to turn into a compound clip (e.g. 'V1.1' or 'playhead'). Defaults to 'playhead'.
+        name: Name for the newly created compound clip (e.g. 'Voice Compound Clip').
+        start_timecode: Optional custom starting timecode for the compound clip container.
+    """
+    return _result(
+        "create_compound_clip",
+        {
+            "item_ids": item_ids,
+            "item_id": item_id,
+            "name": name,
+            "start_timecode": start_timecode,
+        },
+    )
 
 
 @mcp.tool()
@@ -753,11 +820,13 @@ def editing_guide() -> str:
    back to a static zoom on builds that will not keyframe from scripting.
 8. `insert_title` is best effort. If `text_set` is false, say so and ask the user to
    type the text in the Inspector.
-9. Timeline item frames are absolute Resolve timeline frames unless a tool says
+9. Group multi-layer or related clips into a clean single block using `create_compound_clip`.
+   Slow down or speed up playback using `change_clip_speed`.
+10. Timeline item frames are absolute Resolve timeline frames unless a tool says
    otherwise. Marker frames are relative to the timeline start.
-10. Prefer Remotion for designed motion graphics and animated typography. Render a
+11. Prefer Remotion for designed motion graphics and animated typography. Render a
     clip, import it, then ask where to place it.
-11. Resolve's public scripting API cannot perform every interactive Edit page action.
+12. Resolve's public scripting API cannot perform every interactive Edit page action.
     If a tool is absent, explain the limitation instead of pretending it worked.
 """
 

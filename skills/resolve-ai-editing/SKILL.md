@@ -63,6 +63,8 @@ Use `animate_zoom` to generate native Fusion camera keyframes directly on timeli
 
 - Scale, reframe, or blend an existing clip with `set_clip_transform`. It takes `zoom`, `zoom_x`/`zoom_y`, `pan`/`tilt` (pixels), the percent variants, `rotation`, crop, `opacity`, `composite_mode`, and modes such as `scaling`, `resize_filter`, `retime_process`, and `motion_estimation`. This is a static transform.
 - Cut a clip in two with `split_clip`, choosing the point by `frame`, `timecode`, or the playhead. It rebuilds the clip as two pieces. It does NOT copy color grades or Fusion comps onto the halves — tell the user when that matters.
+- Group multiple timeline items into a clean single compound clip with `create_compound_clip(item_ids=['V1.1', 'A1.1'], name='Scene 1')` or `create_compound_clip(item_id='playhead')`.
+- Adjust playback speed with `change_clip_speed(item_id='playhead', speed=0.75)` or `slow_down_percent=25.0` for slow motion, or `speed_up_percent=50.0` for faster playback. Uses native Fusion `TimeSpeed` nodes with subframe interpolation enabled.
 - All operations accept `item_id="playhead"` to act on the clip under the playhead, so you need not look up the id first. Still confirm with `timeline_overview` afterwards.
 - `split_clip` is only near-reversible: it deletes and re-adds the clip. Confirm the frame is right before cutting, and inspect the result.
 
