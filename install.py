@@ -10,11 +10,13 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 import venv
 from pathlib import Path
 
 
-VERSION = "1.5.0"
+from bridge.operations import AGENT_VERSION as VERSION
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 TOKEN_FILE = HOME / "token.txt"
@@ -157,6 +159,20 @@ def write_configs(token=None):
     (HOME / "codex-command.txt").write_text(codex_line + "\n", encoding="utf-8")
     (HOME / "claude-command.txt").write_text(claude_line + "\n", encoding="utf-8")
     return entry, config, claude_line, codex_line
+
+
+def install_source_decoder():
+    """Optional private FFmpeg binary; the Resolve worker stays standard-library only."""
+    subprocess.run([str(venv_python()), "-m", "pip", "install", "--disable-pip-version-check",
+                    "imageio-ffmpeg>=0.6,<1"], check=True)
+    result = subprocess.run([str(venv_python()), "-c",
+                             "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"],
+                            check=True, capture_output=True, text=True)
+    binary = Path(result.stdout.strip())
+    if not binary.is_file():
+        fail("The optional FFmpeg package did not provide an executable.")
+    (HOME / "ffmpeg-path.txt").write_text(str(binary) + "\n", encoding="utf-8")
+    print("      Configured the private FFmpeg source decoder.")
 
 
 # ------------------------------------------------------- Resolve Scripts menu
@@ -335,14 +351,30 @@ def auto_configure_clients(entry):
             if config_path.is_file():
                 try:
                     data = json.loads(config_path.read_text(encoding="utf-8"))
-                except Exception:
-                    data = {}
-            if not isinstance(data, dict):
-                data = {}
-            if "mcpServers" not in data or not isinstance(data["mcpServers"], dict):
-                data["mcpServers"] = {}
+                except (ValueError, OSError) as exc:
+                    print("      Could not read %s configuration; left unchanged: %s" % (label, exc))
+                    return False
+            if not isinstance(data, dict) or ("mcpServers" in data and not isinstance(data["mcpServers"], dict)):
+                print("      Invalid %s configuration structure; left unchanged." % label)
+                return False
+            data.setdefault("mcpServers", {})
             data["mcpServers"]["resolve-ai-bridge"] = entry
-            config_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            if config_path.is_file():
+                backup = config_path.with_name(config_path.name + ".backup-%d" % time.time_ns())
+                shutil.copy2(config_path, backup)
+            fd, temporary = tempfile.mkstemp(prefix="." + config_path.name, dir=str(config_path.parent))
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(data, handle, indent=2)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if config_path.exists():
+                    os.chmod(temporary, config_path.stat().st_mode & 0o777)
+                os.replace(temporary, config_path)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
             if label not in configured:
                 configured.append(label)
             return True
@@ -464,6 +496,7 @@ def main():
     parser.add_argument("--rotate-token", action="store_true", help="Create a new token and rewrite MCP snippets")
     parser.add_argument("--skip-deps", action="store_true", help="Copy files without running pip")
     parser.add_argument("--no-menu", action="store_true", help="Skip the Workspace > Scripts menu entries")
+    parser.add_argument("--with-ffmpeg", action="store_true", help="Install an optional private FFmpeg binary for Free-compatible frame/audio extraction")
     parser.add_argument("--uninstall", action="store_true", help="Remove the installed per-user runtime")
     args = parser.parse_args()
 
@@ -481,6 +514,8 @@ def main():
     print("[0/5] Copied the Console worker and MCP bridge.")
     token = get_token(rotate=args.rotate_token)
     install_dependencies(skip=args.skip_deps)
+    if args.with_ffmpeg:
+        install_source_decoder()
     print("[3/5] Writing the authenticated MCP configuration...")
     _entry, _config, claude_line, codex_line = write_configs(token)
     menu_paths = [] if args.no_menu else install_menu_scripts()

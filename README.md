@@ -1,194 +1,176 @@
 # DaVinci Resolve AI Bridge
 
-
-<img width="768" alt="demo_preview" src="https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/assets/demo.gif" />
+<img width="768" alt="Resolve AI Bridge demo" src="https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/assets/demo.gif" />
 
 [![npm version](https://img.shields.io/npm/v/davinci-resolve-ai-bridge-mcp.svg)](https://www.npmjs.com/package/davinci-resolve-ai-bridge-mcp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![DaVinci Resolve Free & Studio](https://img.shields.io/badge/DaVinci%20Resolve-Free%20%26%20Studio-brightgreen.svg)](https://www.blackmagicdesign.com/products/davinciresolve)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/downloads/)
 
-Resolve AI Bridge is an ultra-lightweight Model Context Protocol (MCP) bridge that lets AI coding assistants (Claude, Claude Code, Antigravity, Cursor, Windsurf, Codex, VS Code) inspect, analyze, and edit projects open in DaVinci Resolve (Free and Studio).
+Connect AI assistants to the project open in **DaVinci Resolve Free** through a local MCP bridge. Inspect timelines, place media, animate clips, review edits on duplicate timelines, and analyze source audio. Studio users can use the same bridge.
 
-> ### 100% Free, Lighter & Faster
-> * **No $295 Studio Paywall**: Full feature parity on **DaVinci Resolve Free** with zero restrictions.
-> * **Significantly Lighter & Faster**: Takes up far less storage and starts up noticeably faster than other DaVinci Resolve MCP servers, with zero dependency bloat.
-> * **Minimal Token Context**: Compact tool schema so your AI responds immediately without eating your context window.
+The Free workflow runs a small worker **inside Resolve's Py3 Console**. It does not need a Studio license, paid AI feature, remote server, or manually entered API token. Availability of individual Resolve operations still depends on your version and media. The bridge cannot unlock Studio-only effects.
 
-**Prerequisite:** Requires Python 3.10 or newer (download from [python.org/downloads](https://www.python.org/downloads/) if not already on your computer).
+## Install
 
-> ⭐ **If you enjoy this repo and find Resolve AI Bridge helpful, please consider giving it a star! It really helps out the project and lets more creators discover it.**
-
----
-
-## Quick Setup
-
-### Option A: Run directly with npx (Recommended for Node / npm users)
+Requires Python 3.10 or later. Node/npm is only needed for the npm installer and optional website/motion-graphics development.
 
 ```bash
 npx davinci-resolve-ai-bridge-mcp
 ```
 
-### Option B: One-Line Shell Install
+For Free-compatible source frame capture and efficient audio decoding, also install the optional private FFmpeg binary:
 
-**macOS / Linux:**
 ```bash
+npx davinci-resolve-ai-bridge-mcp --with-ffmpeg
+```
+
+This optional download stays in the bridge's private Python environment. It is not a Studio dependency. An existing `ffmpeg` on PATH also works; macOS `afconvert` supports audio extraction without FFmpeg.
+
+Other installation routes:
+
+```bash
+# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/install.sh | bash
 ```
 
-**Windows PowerShell:**
 ```powershell
+# Windows PowerShell
 irm https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/install.ps1 | iex
 ```
 
-*(Alternatively, if you cloned the repository or downloaded the ZIP, double-click `install-macos.command` / `install-windows.bat` or run `python3 install.py`).*
+From a downloaded/cloned repository, run `python3 install.py --with-ffmpeg` (Windows: `py install.py --with-ffmpeg`), or use `install-macos.command` / `install-windows.bat` for the base install.
 
-The installer sets up the local isolated runtime environment, installs dependencies, and automatically configures detected AI tools (Claude Desktop, Cursor, Windsurf, VS Code, Claude Code, Codex, and Antigravity).
+The installer copies the bridge into `~/.resolve-ai-bridge`, creates a private Python environment, installs menu launchers and editing skills, and configures detected supported AI clients. Existing valid JSON configurations are backed up and merged. Invalid configurations are left unchanged with a diagnostic. Antigravity and other clients can use the generated `mcp-config.json` manually.
 
----
+## Start the worker in Resolve Free
 
-## How to Connect to DaVinci Resolve
+1. Open Resolve with a project.
+2. Choose **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge**. Depending on the menu layout, it may appear under **Utility**.
+3. In the Console, select **Py3**, paste the copied command, and press Enter.
+4. Wait for **RESOLVE AI BRIDGE READY**. Create or open a timeline before using timeline tools.
 
-### For Free Version Users (Standard Setup)
+Portable fallback command for the Py3 Console:
 
-1. Open **DaVinci Resolve** with any project or timeline.
-2. In the top menu bar, click **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
-   * *This opens the Console window and automatically copies the activation command directly to your clipboard.*
-3. In the Console window, click the **Py3** tab at the top, press **Cmd+V** (macOS) or **Ctrl+V** (Windows) to paste, and press **Enter**.
-
-*(Backup: If the command did not copy automatically, copy and paste this line into the Py3 tab:)*
 ```python
 import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
 ```
 
-Once activated, the bridge stays live and auto-reloading for your entire editing session.
+Run the worker once each Resolve session. The menu launcher helps copy the command; it does not mean the worker is running until the READY message appears. If the Scripts menu is missing after installation, restart Resolve once.
 
----
+When external scripting is available, the bridge can attach directly. Studio users can enable **Preferences → System → General → External scripting using → Local**. Direct attach is probed in a disposable process; when unavailable, the Console transport is used. Free users can stay with the Console workflow.
 
-### For Studio Version Users ($295 License)
+## Connect Codex / ChatGPT desktop
 
-DaVinci Resolve Studio supports background external socket scripting with zero clicks:
-1. Open **DaVinci Resolve > Preferences > System > General**.
-2. Set **External scripting using** to **Local** and click **Save**.
-3. The bridge connects **automatically in the background with zero clicks** whenever Resolve is open.
+The installer registers the bridge when it finds the Codex CLI. Check with:
 
----
+```bash
+codex mcp get resolve-ai-bridge
+```
 
-## MCP Client Configuration
+If needed, register the installed runtime on macOS/Linux:
 
-If you are adding the MCP server manually to your AI client configuration:
+```bash
+codex mcp add resolve-ai-bridge -- "$HOME/.resolve-ai-bridge/.venv/bin/python" "$HOME/.resolve-ai-bridge/bridge/server.py"
+```
 
-### Claude Desktop (`claude_desktop_config.json`) / Cursor / Antigravity
+On Windows PowerShell:
+
+```powershell
+codex mcp add resolve-ai-bridge -- "$HOME/.resolve-ai-bridge/.venv/Scripts/python.exe" "$HOME/.resolve-ai-bridge/bridge/server.py"
+```
+
+Restart/refresh the MCP server in the desktop app after setup or a tool-schema update. Start a new task and ask: **“Call resolve_status, then bridge_capabilities and timeline_overview.”** With no timeline open, `resolve_status` can still confirm the project connection.
+
+The ChatGPT desktop app and local Codex clients on the same host share the Codex MCP configuration. **ChatGPT web does not read this local configuration**; remote plugin/tunnel setup is a separate integration and is not installed by this project. See [official MCP setup documentation](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+For lengthy source analysis, the optional Codex server setting `tool_timeout_sec = 180` allows more time than its default timeout. Keep it inside the existing `[mcp_servers.resolve-ai-bridge]` table.
+
+## Other MCP clients
+
+Use the absolute-path server entry generated at `~/.resolve-ai-bridge/mcp-config.json`. The installer also writes `claude-command.txt` and `codex-command.txt` there.
+
+For clients that support npm commands, **install first**, then start the server with the explicit `--serve` mode:
 
 ```json
 {
   "mcpServers": {
     "resolve-ai-bridge": {
-      "command": "sh",
-      "args": [
-        "-c",
-        "exec \"$HOME/.resolve-ai-bridge/.venv/bin/python\" \"$HOME/.resolve-ai-bridge/bridge/server.py\""
-      ]
+      "command": "npx",
+      "args": ["-y", "davinci-resolve-ai-bridge-mcp", "--serve"]
     }
   }
 }
 ```
 
-Or using the installed global binary:
+`npx davinci-resolve-ai-bridge-mcp` without `--serve` is the **installer**, not an MCP stdio process. Prefer the generated absolute Python command for predictable offline startup. The installer-created `resolve-ai-bridge` launcher starts the server directly; npm's executable with the same name requires `--serve`.
 
-```json
-{
-  "mcpServers": {
-    "resolve-ai-bridge": {
-      "command": "resolve-ai-bridge"
-    }
-  }
-}
-```
+No token is needed in the client configuration. The server and Console worker share a local token file automatically.
 
-### Claude Code CLI
+## Inspect, preview, edit, verify
 
-```bash
-claude mcp add resolve-ai-bridge -- resolve-ai-bridge
-```
+1. Call `resolve_status` and `timeline_overview`.
+2. Use each clip's **`id`**, which uses its Resolve unique ID when available. `label` values such as `V1.2` remain accepted but can change after insertions/deletions. Rebuilt and duplicated clips have new IDs.
+3. Call `preview_timeline` before a batch of changes. It creates and opens a copy while keeping the original.
+4. Get fresh IDs from `timeline_overview`, make edits, and inspect after each change.
+5. Use `compare_timelines(original, preview)` to review structural changes. Audition/view the result in Resolve too: the comparison does not render pixels or compare all Fusion, color, or Fairlight data.
 
----
+All public `frame` inputs and clip start/end positions use **absolute timeline frames**. Marker offsets are relative to timeline start. Timecodes support non-drop-frame and 29.97/59.94 drop-frame (`HH:MM:SS;FF`). Cut end positions are exclusive.
 
-## Motion Graphics & Remotion
+## Tools
 
-Remotion is a framework that lets developers and AI agents create video animations and motion graphics programmatically using React code.
+| Tool | What it does |
+| --- | --- |
+| `resolve_status`, `bridge_capabilities` | Connection, version, current project and decoder/API availability. |
+| `timeline_overview`, `project_info`, `list_timelines` | Inspect timeline structure, unique clip IDs, labels and settings. |
+| `timeline_frame` | Return a native MCP image plus metadata. Composite capture is attempted first; FFmpeg source fallback is labeled explicitly. |
+| `timeline_audio` | Source PCM peak/RMS per channel, silence intervals, energy envelope, onsets, activity clusters or a trimmed WAV. |
+| `preview_timeline`, `compare_timelines` | Duplicate/open a review timeline and compare structure/properties/markers without switching during comparison. |
+| `project_health` | Check active-timeline missing sources, gaps, disabled/locked tracks/clips and supplied delivery expectations. |
+| `review_silence`, `apply_silence_cuts` | Place candidate markers, then apply explicitly accepted intervals on a duplicate of an isolated dialogue clip or aligned AV pair. |
+| `open_timeline`, `create_timeline`, `set_playhead`, `open_page` | Navigate Resolve. |
+| `list_media`, `import_media`, `append_media`, `add_image` | Inspect/import/place media and duration-controlled stills. |
+| `set_clip_transform`, `get_clip_transform`, `animate_zoom` | Static transforms and native Fusion animation. |
+| `split_clip` | Rebuild a normal-speed clip into two pieces, with a verified timeline checkpoint first. See restrictions below. |
+| `insert_title` | Best-effort title insertion; check `text_set`. |
+| `create_compound_clip`, `change_clip_speed` | Compound creation and constant video speed through a bridge-owned TimeSpeed node. |
+| `get_clip_grade`, `set_clip_grade`, `keyframe_clip_saturation`, `animate_color_fx` | Inspect/change available grade controls and Fusion color animation. |
+| `apply_blur_effect`, `apply_spotlight_mask`, `inspect_fusion` | Existing Fusion blur/mask workflows and inspection. |
+| `add_marker`, `delete_marker`, `set_clip_property`, `set_clip_color`, `set_clip_enabled` | Markers and clip metadata/state. |
+| `add_track`, `set_track_name`, `delete_clips`, `save_project` | Track management, explicitly requested deletion, and saving. |
+| `list_render_presets`, `render_current_timeline` | Inspect available presets and queue/start an approved render. |
 
-- **React-Based Video & 3D Mockups**:
-  Build custom motion graphics, animated 3D laptop/device mockups, and dynamic lower thirds in React. AI coding agents can write the code, render the video clip, and place it directly onto the DaVinci Resolve timeline using `append_media`.
-- **Kinetic Typography & Bouncy Text**:
-  Generate modern word-by-word spring reveals, letter-by-letter waterfall bounce animations, and contrast font pairings that land in sync with dialogue.
-- **Smooth Zooms & Camera Moves**:
-  Create natural, smooth camera glides and keyframed punch-ins with zero stepped cuts or black flickers on both Free and Studio timelines.
-- **Extra Visual Effects & Callouts**:
-  Floating glass magnifier cards (`magnifier-callout` skill), spotlight blur masks, saturation transitions, and animated color shifts.
+## Compatibility and limitations
 
-```bash
-# Add Remotion AI agent skills
-npx -y skills@latest add remotion-dev/skills -g -y
-```
+- **Free edition:** New review workflows use ordinary timeline, marker and clip APIs through the Console worker. No Studio AI transcription, Magic Mask, Smart Reframe, or neural feature was added. Calls check their results and report unsupported behavior.
+- **Frame images:** Source fallback shows decoded source media, **not** the graded/composited viewer. It omits Fusion, transforms and overlays. `mode="composite"` fails explicitly if a composited still is unavailable. Without a resize utility, actual dimensions are reported rather than invented.
+- **Audio:** Analysis reads source PCM, not the Fairlight mix. It excludes timeline gain, fades, mute, effects and retiming. Known source retiming is rejected. Silence uses 50 ms windows, not speech transcription. Results include the source offset, absolute timeline origin, exclusive ends and a truncation flag; default analysis limit is 300 seconds.
+- **Splits:** Fusion clips, locked tracks, mixed rates and known retiming are rejected before deletion. A checkpoint is retained. Rebuilt clips restore static transforms, enabled state, clip color and the current color-grade layer. Audio links, fades, keyframes, other grade layers and all metadata are not guaranteed. On failure, the tool opens the checkpoint and reports any partial attempted timeline honestly.
+- **Dialogue cuts:** Automatic application is restricted to one isolated clip or one aligned video/audio pair. It rejects stale review markers and complex multi-clip timelines. The original is kept intact. Review audio gain, fades and non-review markers on the result.
+- **Speed:** Fusion mode changes video timing inside the clip, not timeline duration or linked audio. Resetting to 1× neutralizes only the updated bridge's own node; user-created and older untagged TimeSpeed nodes are left alone. Reverse mapping is not verified and is rejected. Clip-attributes mode changes **all uses of that media**, multiplying its current source FPS; it is not a per-clip reset or speed ramp.
+- **Validation:** Automated tests cover mocked Resolve operations, source decoding and MCP responses. They do not certify every operation on every Free-version build or platform. See [testing guidance](docs/TESTING.md) for the manual integration checklist.
 
-See [`docs/REMOTION.md`](./docs/REMOTION.md) for workflows and templates.
+## Motion graphics
 
----
+You can render external motion graphics with Remotion and import the result using `append_media`. Remotion is an optional separate toolchain, not part of this bridge's Python runtime. See [Remotion workflows](docs/REMOTION.md).
 
-## Available MCP Tools
-
-| Tool | Description |
-| :--- | :--- |
-| **`resolve_status`** | Check bridge connection, Resolve version, active project, and timeline. |
-| **`timeline_overview`** | Inspect tracks, clips, stable item IDs (`V1.1`, `V2.1`), timecode, and markers. |
-| **`timeline_frame`** | Capture a visual frame snapshot at the playhead or specified timecode. |
-| **`timeline_audio`** | Analyze timeline audio for Peak/RMS loudness, clipping, silence cuts, and beat sync. |
-| **`project_info`** | Get project frame rate, resolution, and timeline counts. |
-| **`list_timelines`** / **`open_timeline`** / **`create_timeline`** | Create, switch, and list timelines. |
-| **`list_media`** / **`import_media`** / **`append_media`** | Search, import, and place media pool assets. |
-| **`add_image`** | Place still images or graphics overlays with custom duration and track target. |
-| **`set_clip_transform`** | Modify pan, tilt, zoom, rotation, opacity, and retiming properties. |
-| **`split_clip`** | Razor cut clips at specific frame numbers, timecodes, or playhead position. |
-| **`animate_zoom`** | Apply keyframed zoom in/out Fusion compositions across clip ranges. |
-| **`insert_title`** | Add customizable text titles directly onto the timeline. |
-| **`keyframe_clip_saturation`** | Smoothly animate color saturation (e.g. full color to black and white) across frames. |
-| **`animate_color_fx`** | Apply animated rainbow color shifting and subtle organic luminance flicker. |
-| **`set_clip_grade`** / **`get_clip_grade`** | Control and inspect ASC-CDL saturation, gain/slope, lift/offset, and gamma/power. |
-| **`add_marker`** / **`delete_marker`** | Place and remove timeline markers with color tags. |
-| **`set_clip_property`** / **`set_clip_color`** / **`set_clip_enabled`** | Inspect and toggle clip parameters. |
-| **`create_compound_clip`** | Combine one or more timeline clips into a single compound clip container. |
-| **`change_clip_speed`** | Adjust clip playback speed (slow down / speed up) via native Fusion TimeSpeed nodes or clip FPS attributes. |
-| **`render_current_timeline`** | Start background timeline export with named presets. |
-
----
-
-## Free vs Studio Version
-
-Most other DaVinci Resolve scripting and automation tools require you to purchase the **$295 DaVinci Resolve Studio** license because Blackmagic Design restricts standard external API access in the free version.
-
-**Resolve AI Bridge is completely free and works identically on both the Free and Studio versions of DaVinci Resolve.**
-
-* **Dual-Transport Architecture**: If external scripting is restricted or disabled in Resolve Preferences, the bridge automatically attaches via the internal Console worker (`ResolveConsole.py`).
-* **Subpixel Compositor Roundtrips**: Bypasses the Free edition's locked Edit-page spline scripting to deliver broadcast-quality keyframing, floating magnifier callouts, and kinetic typography.
-* **100% Feature Parity**: Timeline inspection, audio loudness analysis, frame capture, title generation, VAD speech sync, and media placement work on the Free version without any paid license or watermark.
-
----
-
-## Verification and Troubleshooting
-
-Run the diagnostic tool before editing files:
+## Development and verification
 
 ```bash
+python3 -m pip install -r requirements.txt
+python3 -m unittest discover -s tests -v
+node tools/check-package.mjs
 python3 tools/doctor.py
 ```
 
-- **Bridge reported offline**: Ensure DaVinci Resolve is open with a project. Check **Preferences > System > General > External scripting using** is set to **Local**. If needed, click **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
-- **Missing Scripts Menu**: Fully quit and reopen DaVinci Resolve so it rescans the script directories.
-- Detailed troubleshooting guides are available in [`docs/TROUBLESHOOTING.md`](./docs/TROUBLESHOOTING.md).
+Website development dependencies are separate from the published CLI's runtime dependencies:
 
----
+```bash
+npm ci
+npm run build
+```
 
-## License
+The package check creates and inspects a temporary npm tarball; it does not publish. CI tests Python on macOS, Windows and Linux and checks website/package builds. Maintainers: see [release instructions](docs/RELEASING.md).
 
-MIT. See [`LICENSE`](./LICENSE).
+[Editing recipes](docs/RECIPES.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Release notes](RELEASE_NOTES.md)
+
+MIT license. See [LICENSE](LICENSE).

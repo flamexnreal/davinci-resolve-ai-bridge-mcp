@@ -1,13 +1,12 @@
 {
   "name": "davinci-resolve-ai-bridge-mcp",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "A local MCP bridge that lets AI coding assistants (Antigravity, Claude, Cursor, Codex) view and edit the project open in DaVinci Resolve",
   "type": "module",
   "bin": {
     "davinci-resolve-ai-bridge-mcp": "bin/cli.js",
     "resolve-ai-bridge": "bin/cli.js"
   },
-  "main": "dist/index.html",
   "files": [
     "bin",
     "agent",
@@ -19,12 +18,14 @@
     "install.sh",
     "install.ps1",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "requirements.txt"
   ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "python3 -m unittest discover -s tests -v"
   },
   "keywords": [
     "mcp",
@@ -46,13 +47,6 @@
     "url": "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/issues"
   },
   "homepage": "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp#readme",
-  "dependencies": {
-    "clsx": "2.1.1",
-    "framer-motion": "^12.42.2",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
-    "tailwind-merge": "3.4.0"
-  },
   "devDependencies": {
     "@tailwindcss/vite": "4.1.17",
     "@types/node": "22.19.17",
@@ -62,6 +56,11 @@
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.3.2",
-    "vite-plugin-singlefile": "2.3.0"
+    "vite-plugin-singlefile": "2.3.0",
+    "clsx": "2.1.1",
+    "framer-motion": "^12.42.2",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "tailwind-merge": "3.4.0"
   }
 }

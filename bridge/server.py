@@ -8,6 +8,7 @@ Never print to stdout from this process. MCP uses stdout for JSON-RPC.
 """
 
 import json
+import base64
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -17,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import TextContent, ImageContent
 
 from bridge import client, transport
 from bridge.operations import AGENT_VERSION
@@ -30,8 +32,8 @@ mcp = FastMCP(
     "Resolve AI Bridge",
     instructions=(
         "Inspect before editing. Call resolve_status, then timeline_overview. "
-        "Refer to timeline items by ids such as V1.2, or pass item_id='playhead'. "
-        "Verify after each change. Use add_image for stills and set_clip_transform "
+        "Prefer stable unique item ids from timeline_overview; V1.2 labels change after edits. Or pass item_id='playhead'. "
+        "Use preview_timeline before a batch of edits, retaining the original. Verify after each change. Use add_image for stills and set_clip_transform "
         "to position them, animate_zoom for a scale that moves over time, "
         "split_clip to cut a clip in two, create_compound_clip to group clips into "
         "a compound container, and change_clip_speed for slow motion or speed changes. "
@@ -94,7 +96,7 @@ def list_timelines() -> str:
 
 @mcp.tool()
 def timeline_overview(max_items: int = 500) -> str:
-    """Inspect tracks, clips, stable item ids, frame ranges, playhead timecode, and markers. Call before and after edits."""
+    """Inspect stable unique clip IDs, positional labels, tracks, frame ranges and markers. Call before and after edits."""
     return _result("timeline_overview", {"max_items": max_items})
 
 
@@ -105,23 +107,27 @@ def timeline_frame(
     max_width: int = 1280,
     format: str = "jpg",
     mode: str = "auto",
-) -> str:
-    """Capture and inspect a visual frame snapshot of the timeline at the playhead or specified timecode.
+) -> list[TextContent | ImageContent]:
+    """Return a native MCP image of the requested absolute timeline frame or timecode.
 
-    Supports intelligent multi-tier capture:
-    - Tier 1: Native Direct Frame Dump (ExportCurrentFrameAsStill) capturing grades, Fusion effects, and titles.
-    - Tier 2: High-speed hardware source extraction fallback (sub-50ms) for 100% Free Resolve compatibility.
+    Auto attempts a composited still, then Free-compatible ffmpeg source extraction.
+    Source fallback excludes timeline transforms, grades, Fusion and overlays.
+    mode='composite' fails explicitly when a true timeline still is unavailable.
     """
-    return _result(
-        "timeline_frame",
-        {
-            "timecode": timecode,
-            "frame": frame,
-            "max_width": max_width,
-            "format": format,
-            "mode": mode,
-        },
-    )
+    payload = json.loads(_result("timeline_frame", {"timecode": timecode, "frame": frame,
+                          "max_width": max_width, "format": format, "mode": mode}, timeout=100))
+    if not payload.get("ok"):
+        return [TextContent(type="text", text=json.dumps(payload))]
+    result = payload["result"]
+    data = result.pop("image_base64", None)
+    try:
+        if not data:
+            raise ValueError("empty image")
+        base64.b64decode(data, validate=True)
+    except (ValueError, TypeError):
+        return [TextContent(type="text", text=json.dumps({"ok": False, "error": "Bridge returned invalid image data."}))]
+    mime = "image/png" if result.get("format") == "png" else "image/jpeg"
+    return [TextContent(type="text", text=json.dumps(payload)), ImageContent(type="image", data=data, mimeType=mime)]
 
 
 @mcp.tool()
@@ -131,25 +137,23 @@ def timeline_audio(
     item_id: Optional[str] = None,
     silence_threshold_db: float = -40.0,
     min_silence_duration: float = 0.3,
+    max_duration_seconds: float = 300,
+    whole_clip: bool = False,
+    lead_offset_ms: float = 160,
+    threshold_db: float = -34,
 ) -> str:
-    """Analyze audio on the timeline for loudness health, clipping, silence intervals, and beat sync.
+    """Analyze selected source PCM, excluding Fairlight gain, fades, mute and the timeline mix.
 
-    Actions:
-    - 'analyze': Returns overall duration, sample rate, channels, peak dBFS, RMS dBFS, and clipping status.
-    - 'silence_cuts': Detects silence/dead-air intervals and returns exact start/end frames for jump-cuts.
-    - 'energy_envelope': Computes a 50ms time-series RMS loudness profile for animation & beat synchronization.
-    - 'export_slice': Extracts a clean WAV audio slice to disk for transcription or alignment.
+    Actions: analyze (per-channel peak/RMS), silence_cuts, energy_envelope,
+    export_slice, onsets, vad_clusters. Defaults to the range from playhead to clip end;
+    whole_clip starts at the clip in-point. Decode is capped at max_duration_seconds.
+    Cut end frames are exclusive; timeline_* fields use absolute timeline coordinates.
+    Known retiming is rejected rather than guessed. Needs ffmpeg or macOS afconvert.
     """
-    return _result(
-        "timeline_audio",
-        {
-            "action": action,
-            "track_index": track_index,
-            "item_id": item_id,
-            "silence_threshold_db": silence_threshold_db,
-            "min_silence_duration": min_silence_duration,
-        },
-    )
+    return _result("timeline_audio", {"action": action, "track_index": track_index, "item_id": item_id,
+                   "silence_threshold_db": silence_threshold_db, "min_silence_duration": min_silence_duration,
+                   "max_duration_seconds": max_duration_seconds, "whole_clip": whole_clip,
+                   "lead_offset_ms": lead_offset_ms, "threshold_db": threshold_db}, timeout=120)
 
 
 @mcp.tool()
@@ -164,13 +168,81 @@ def list_render_presets() -> str:
     return _result("list_render_presets")
 
 
+@mcp.tool()
+def preview_timeline(name: Optional[str] = None) -> str:
+    """Duplicate and open the active timeline for reviewing edits while retaining the original.
+
+    No edits are applied by this call. Get fresh clip IDs with timeline_overview,
+    edit the preview, and compare_timelines before accepting it.
+    """
+    return _result("preview_timeline", {"name": name}, timeout=90)
+
+
+@mcp.tool()
+def compare_timelines(original: str, preview: str) -> str:
+    """Compare two timelines by unique ID or exact name without changing the active timeline.
+
+    Reports structural/property/marker changes; does not compare rendered pixels,
+    internal Fusion graphs, full grades or Fairlight processing.
+    """
+    return _result("compare_timelines", {"original": original, "preview": preview})
+
+
+@mcp.tool()
+def project_health(expected_frame_rate: Optional[float] = None, expected_width: Optional[int] = None,
+                   expected_height: Optional[int] = None) -> str:
+    """Inspect active-timeline missing sources, gaps, disabled/locked tracks and clips.
+
+    Optionally compare timeline resolution/rate against your delivery requirements.
+    Gaps and disabled tracks can be intentional; this does not inspect Fairlight automation.
+    """
+    return _result("project_health", {"expected_frame_rate": expected_frame_rate,
+                   "expected_width": expected_width, "expected_height": expected_height})
+
+
+@mcp.tool()
+def bridge_capabilities() -> str:
+    """Report Resolve version, transport, API presence and source decoder availability.
+
+    API presence does not guarantee operation success. New review workflows use
+    ordinary timeline APIs and work through the Console worker in Resolve Free.
+    """
+    return _result("bridge_capabilities")
+
+
+@mcp.tool()
+def review_silence(item_id: Optional[str] = None, track_index: int = 1,
+                   silence_threshold_db: float = -40, min_silence_duration: float = 0.3,
+                   max_duration_seconds: float = 300) -> str:
+    """Analyze source audio for a clip and place yellow review markers; never deletes clips.
+
+    Analysis starts at the clip's in-point and excludes Fairlight processing.
+    Audition the markers, then pass accepted marker IDs to apply_silence_cuts.
+    """
+    return _result("review_silence", {"item_id": item_id, "track_index": track_index,
+                   "silence_threshold_db": silence_threshold_db, "min_silence_duration": min_silence_duration,
+                   "max_duration_seconds": max_duration_seconds}, timeout=120)
+
+
+@mcp.tool()
+def apply_silence_cuts(marker_ids: list[str], name: Optional[str] = None) -> str:
+    """Remove USER-ACCEPTED silence intervals on a new duplicate timeline, retaining the original.
+
+    Supports an isolated normal-speed dialogue clip or one aligned video/audio pair.
+    Complex timelines, Fusion clips, changed timelines and mixed frame rates are rejected.
+    Requires explicit user approval of the selected cuts. Review the resulting preview:
+    rebuilding does not guarantee preservation of fades, gain automation or all metadata.
+    """
+    return _result("apply_silence_cuts", {"marker_ids": marker_ids, "name": name}, timeout=120)
+
+
 # ---------------------------------------------------------------- navigation
 
 
 @mcp.tool()
-def open_timeline(name: Optional[str] = None, index: Optional[int] = None) -> str:
-    """Open a timeline by exact name or one-based index from list_timelines."""
-    return _result("open_timeline", {"name": name, "index": index})
+def open_timeline(name: Optional[str] = None, index: Optional[int] = None, timeline_id: Optional[str] = None) -> str:
+    """Open a timeline by unique ID, exact name or one-based index from list_timelines."""
+    return _result("open_timeline", {"name": name, "index": index, "timeline_id": timeline_id})
 
 
 @mcp.tool()
@@ -379,15 +451,12 @@ def split_clip(
     timecode: Optional[str] = None,
     track_index: Optional[int] = None,
 ) -> str:
-    """Cut one timeline clip into two pieces at a point, automating a razor edit.
+    """Split a normal-speed clip at an absolute frame/timecode after creating a timeline checkpoint.
 
-    Resolve's scripting API has no razor, so the cut is rebuilt: the clip is
-    removed and re-added as two adjacent pieces that keep the original source
-    frames and Edit-page transform. Identify the clip by an id such as V1.2, or
-    leave item_id as "playhead" to cut the clip under the playhead. Choose the
-    cut point with frame (a timeline frame), timecode (HH:MM:SS:FF), or neither
-    to cut at the playhead. Color grades and Fusion comps on the original are not
-    copied to the halves; the result says so. Verify with timeline_overview.
+    Keeps static transforms, enabled state, color and current grade layer. Rejects Fusion
+    compositions and mixed rates; audio links/fades/metadata are not guaranteed.
+    On a failed rebuild, opens the checkpoint and reports the partial attempted timeline.
+    Prefer unique IDs from timeline_overview. Verify the resulting halves.
     """
     return _result(
         "split_clip",
@@ -452,7 +521,11 @@ def change_clip_speed(
     reverse: bool = False,
     method: str = "fusion",
 ) -> str:
-    """Change the playback speed of a timeline clip (e.g. slow motion or speed ramp).
+    """Change constant video speed through a bridge-owned Fusion TimeSpeed node.
+
+    Existing Fusion connections are preserved. Timeline duration and linked audio are unchanged.
+    Speed 1 neutralizes only bridge-owned nodes. Reverse is not currently verified.
+    Clip-attributes mode changes EVERY use of the source media, relative to its current FPS.
 
     Args:
         item_id: Target clip id (e.g. 'V1.1', 'playhead', or clip name). Defaults to active clip under playhead.
@@ -461,7 +534,7 @@ def change_clip_speed(
         slow_down_percent: Slowdown percentage (e.g. 25.0 to slow down by 25% -> 0.75x speed).
         speed_up_percent: Speedup percentage (e.g. 50.0 to speed up by 50% -> 1.5x speed).
         interpolate_frames: Whether to enable smooth frame interpolation/blending (default True).
-        reverse: Whether to reverse clip playback (default False).
+        reverse: Must be False; use Resolve manually for reverse playback.
         method: Implementation method: 'fusion' (native TimeSpeed node, default) or 'clip_attributes' (MediaPoolItem FPS).
     """
     return _result(

@@ -12,12 +12,14 @@ import ``mcp``, ``fusionscript``, or anything from ``bridge.server`` here.
 """
 
 import json
+import math
 import os
 import time
+import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.9.0"
+AGENT_VERSION = "1.10.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -211,31 +213,70 @@ class ResolveOperations:
         return pool
 
     def _project_rate(self):
-        raw = call(self._project(), "GetSetting", "24", "timelineFrameRate") or "24"
+        project = self._project()
+        timeline = call(project, "GetCurrentTimeline", None)
+        raw = call(timeline, "GetSetting", None, "timelineFrameRate")
+        raw = raw or call(project, "GetSetting", "24", "timelineFrameRate") or "24"
         try:
-            return float(str(raw).replace(" DF", "").strip())
-        except ValueError:
+            rate = float(str(raw).replace(" DF", "").strip())
+            for nominal in (24, 30, 48, 60, 120):
+                if abs(rate - nominal / 1.001) < 0.002:
+                    return nominal / 1.001
+            return rate if math.isfinite(rate) and rate > 0 else 24.0
+        except (ValueError, TypeError):
             return 24.0
 
     def _project_resolution(self):
         project = self._project()
+        timeline = call(project, "GetCurrentTimeline", None)
         try:
-            width = int(call(project, "GetSetting", 1920, "timelineResolutionWidth") or 1920)
-            height = int(call(project, "GetSetting", 1080, "timelineResolutionHeight") or 1080)
+            width = int(call(timeline, "GetSetting", None, "timelineResolutionWidth") or call(project, "GetSetting", 1920, "timelineResolutionWidth") or 1920)
+            height = int(call(timeline, "GetSetting", None, "timelineResolutionHeight") or call(project, "GetSetting", 1080, "timelineResolutionHeight") or 1080)
         except (TypeError, ValueError):
             width, height = 1920, 1080
         return width, height
 
     def _tc_frames(self, value, fps):
+        drop = ";" in str(value)
         parts = str(value).replace(";", ":").split(":")
         if len(parts) != 4:
-            return 0
+            raise OperationError("Invalid timecode: %s. Use HH:MM:SS:FF or HH:MM:SS;FF." % value)
         try:
             hours, minutes, seconds, frames = [int(part) for part in parts]
         except ValueError:
-            return 0
+            raise OperationError("Invalid timecode: %s." % value)
         rounded = max(1, int(round(fps)))
-        return ((hours * 3600 + minutes * 60 + seconds) * rounded) + frames
+        if min(hours, minutes, seconds, frames) < 0 or minutes >= 60 or seconds >= 60 or frames >= rounded:
+            raise OperationError("Timecode out of range: %s." % value)
+        total = ((hours * 3600 + minutes * 60 + seconds) * rounded) + frames
+        if drop:
+            if rounded not in (30, 60) or abs(fps - rounded / 1.001) > 0.01:
+                raise OperationError("Drop-frame timecode requires 29.97 or 59.94 fps.")
+            skipped = 2 if rounded == 30 else 4
+            if minutes % 10 and seconds == 0 and frames < skipped:
+                raise OperationError("Timecode uses a skipped drop-frame label: %s." % value)
+            total_minutes = hours * 60 + minutes
+            total -= skipped * (total_minutes - total_minutes // 10)
+        return total
+
+    def _frames_tc(self, frame, fps, drop=False):
+        """Convert a timecode frame count to a valid SMPTE label."""
+        frame = int(frame)
+        if frame < 0:
+            raise OperationError("Timecode cannot be negative.")
+        nominal = max(1, int(round(fps)))
+        if drop:
+            if nominal not in (30, 60) or abs(fps - nominal / 1.001) > 0.01:
+                raise OperationError("Drop-frame timecode requires 29.97 or 59.94 fps.")
+            skipped = 2 if nominal == 30 else 4
+            ten_minutes = nominal * 600 - skipped * 9
+            minute = nominal * 60 - skipped
+            blocks, remainder = divmod(frame, ten_minutes)
+            frame += skipped * 9 * blocks + skipped * max(0, (remainder - skipped) // minute)
+        seconds, frames = divmod(frame, nominal)
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        return "%02d:%02d:%02d%s%02d" % (hours, minutes, seconds, ";" if drop else ":", frames)
 
     def _current_marker_frame(self, timeline):
         current = call(timeline, "GetCurrentTimecode", "00:00:00:00")
@@ -249,9 +290,12 @@ class ResolveOperations:
         prefix = "V" if track_type == "video" else "A" if track_type == "audio" else "S"
         media_item = call(item, "GetMediaPoolItem", None)
         media_id = call(media_item, "GetUniqueId", None) if media_item is not None else None
+        unique_id = call(item, "GetUniqueId", None)
+        label = "%s%d.%d" % (prefix, track_index, item_index)
         return {
-            "id": "%s%d.%d" % (prefix, track_index, item_index),
-            "unique_id": call(item, "GetUniqueId", None),
+            "id": str(unique_id) if unique_id else label,
+            "label": label,
+            "unique_id": unique_id,
             "name": call(item, "GetName", ""),
             "track_type": track_type,
             "track_index": track_index,
@@ -294,7 +338,7 @@ class ResolveOperations:
             matches = [
                 (item, info)
                 for item, info in all_items
-                if identifier in (str(info.get("id")), str(info.get("unique_id")), str(info.get("name")))
+                if identifier in (str(info.get("id")), str(info.get("label")), str(info.get("unique_id")), str(info.get("name")))
             ]
             if not matches:
                 missing.append(identifier)
@@ -303,7 +347,7 @@ class ResolveOperations:
                 (
                     match
                     for match in matches
-                    if match[1].get("id") == identifier or str(match[1].get("unique_id")) == identifier
+                    if identifier in (match[1].get("id"), match[1].get("label"), str(match[1].get("unique_id")))
                 ),
                 None,
             )
@@ -357,7 +401,9 @@ class ResolveOperations:
             end = info.get("end")
             if start is None or end is None:
                 continue
-            if int(start) <= frame <= int(end):
+            if info.get("enabled") is False or call(timeline, "GetIsTrackEnabled", True, info.get("track_type"), info.get("track_index")) is False:
+                continue
+            if float(start) <= frame < float(end):
                 if want_track is not None and info.get("track_index") != want_track:
                     continue
                 # Prefer the highest track (topmost layer) at the playhead.
@@ -371,12 +417,11 @@ class ResolveOperations:
         return best
 
     def _item_id_after_rebuild(self, timeline, created_item):
-        """Best-effort id (like V1.2) for a freshly appended timeline item."""
+        """Unique ID (positional label only on older builds) after rebuilding."""
         unique = call(created_item, "GetUniqueId", None)
-        if unique is not None:
-            for _, info in self._timeline_items():
-                if str(info.get("unique_id")) == str(unique):
-                    return info.get("id")
+        for item, info in self._timeline_items():
+            if (unique is not None and str(info.get("unique_id")) == str(unique)) or item == created_item:
+                return info.get("id")
         return unique
 
     def _walk_media(self, folder, prefix="", limit=2000):
@@ -546,13 +591,14 @@ class ResolveOperations:
     def _op_project_info(self, _params):
         project = self._project()
         timeline = project.GetCurrentTimeline()
+        width, height = self._project_resolution()
         return {
             "name": project.GetName(),
             "timeline": call(timeline, "GetName", None) if timeline else None,
             "timeline_count": call(project, "GetTimelineCount", 0),
-            "frame_rate": call(project, "GetSetting", None, "timelineFrameRate"),
-            "resolution_width": call(project, "GetSetting", None, "timelineResolutionWidth"),
-            "resolution_height": call(project, "GetSetting", None, "timelineResolutionHeight"),
+            "frame_rate": self._project_rate(),
+            "resolution_width": width,
+            "resolution_height": height,
         }
 
     def _op_list_timelines(self, _params):
@@ -562,6 +608,7 @@ class ResolveOperations:
         for index in range(1, int(project.GetTimelineCount() or 0) + 1):
             item = project.GetTimelineByIndex(index)
             timelines.append({
+                "id": call(item, "GetUniqueId", None),
                 "index": index,
                 "name": call(item, "GetName", ""),
                 "current": item == current,
@@ -574,10 +621,11 @@ class ResolveOperations:
         project = self._project()
         name = params.get("name")
         index = params.get("index")
+        timeline_id = params.get("timeline_id")
         selected = None
         for item_index in range(1, int(project.GetTimelineCount() or 0) + 1):
             item = project.GetTimelineByIndex(item_index)
-            if (index is not None and int(index) == item_index) or (name and item.GetName() == name):
+            if (index is not None and int(index) == item_index) or (name and item.GetName() == name) or (timeline_id and call(item, "GetUniqueId", None) == timeline_id):
                 selected = item
                 break
         if selected is None:
@@ -607,6 +655,8 @@ class ResolveOperations:
                         clips.append(self._item_summary(item, track_type, track_index, item_index))
         return {
             "name": timeline.GetName(),
+            "id": call(timeline, "GetUniqueId", None),
+            "item_id_note": "id uses Resolve's unique ID when available; label (V1.2) is positional and can change after edits.",
             "start_frame": call(timeline, "GetStartFrame", None),
             "end_frame": call(timeline, "GetEndFrame", None),
             "current_timecode": call(timeline, "GetCurrentTimecode", None),
@@ -878,134 +928,89 @@ class ResolveOperations:
         }
 
     def _op_split_clip(self, params):
-        """Cut one timeline clip into two at a frame, synthesised from documented API.
-
-        Resolve exposes no razor/split/trim call, so a cut is rebuilt: read the
-        clip's source range and transform, delete it, then re-append the two
-        halves at their original positions and re-apply the transform. Color
-        grades and Fusion compositions on the clip are NOT carried onto the
-        halves, because the API cannot copy them; that is reported in the result.
-        """
+        """Rebuild a normal-speed clip, keeping a verified timeline checkpoint."""
         timeline = self._timeline()
         item, info = self._resolve_one_item(params.get("item_id"), params.get("track_index"))
-
-        track_type = info.get("track_type")
-        if track_type not in ("video", "audio"):
-            raise OperationError(
-                "split_clip works on video or audio clips. '%s' is a %s clip."
-                % (info["id"], track_type)
-            )
-
-        clip_start = info.get("start")
-        clip_end = info.get("end")
-        duration = call(item, "GetDuration", None)
-        if clip_start is None or clip_end is None or not duration:
-            raise OperationError(
-                "Resolve did not report this clip's frame range, so it cannot be split safely."
-            )
-        clip_start = int(clip_start)
-        clip_end = int(clip_end)
-        total_len = int(duration)
-
-        # Where to cut, as an absolute timeline frame (the first frame of the
-        # right-hand piece). Accept an explicit frame, a timecode, or the playhead.
+        if info.get("track_type") not in ("video", "audio"):
+            raise OperationError("Only normal-speed media clips can be split.")
+        if call(item, "GetFusionCompCount", 0):
+            raise OperationError("This clip has Fusion effects. Rebuilding would lose them; split it in Resolve instead.")
+        if call(timeline, "GetIsTrackLocked", False, info["track_type"], info["track_index"]):
+            raise OperationError("The clip's track is locked.")
+        start, end = float(info["start"]), float(info["end"])
+        if not start.is_integer() or not end.is_integer():
+            raise OperationError("Subframe audio boundaries cannot be rebuilt safely by this tool.")
+        start, end = int(start), int(end)
         frame = params.get("frame")
+        if frame is not None and params.get("timecode"):
+            raise OperationError("Pass frame or timecode, not both.")
         if frame is None and params.get("timecode"):
             fps = self._project_rate()
-            frame = int(call(timeline, "GetStartFrame", 0) or 0) + max(
-                0,
-                self._tc_frames(params["timecode"], fps)
-                - self._tc_frames(call(timeline, "GetStartTimecode", "00:00:00:00"), fps),
-            )
-        if frame is None:
-            frame = self._playhead_frame(timeline)
-        frame = int(frame)
-
-        if not (clip_start < frame < clip_end):
-            raise OperationError(
-                "The cut frame %d is not inside clip %s (timeline frames %d..%d). Move the "
-                "playhead onto the clip, or pass a frame strictly between its start and end."
-                % (frame, info["id"], clip_start, clip_end - 1)
-            )
-
-        media_item = call(item, "GetMediaPoolItem", None)
-        if media_item is None:
-            raise OperationError(
-                "Clip %s has no media pool source (it may be a generator, title, or compound "
-                "clip). Those cannot be split by this tool yet." % info["id"]
-            )
+            frame = int(timeline.GetStartFrame()) + self._tc_frames(params["timecode"], fps) - self._tc_frames(timeline.GetStartTimecode(), fps)
+        frame = self._playhead_frame(timeline) if frame is None else int(frame)
+        if not start < frame < end:
+            raise OperationError("Cut frame must be strictly inside the clip's [%d, %d) range." % (start, end))
+        media = call(item, "GetMediaPoolItem", None)
         source_start = call(item, "GetSourceStartFrame", None)
-        if source_start is None:
-            raise OperationError("Resolve did not report the clip's source start frame.")
-        source_start = int(source_start)
-
-        left_len = frame - clip_start
-        right_len = total_len - left_len
-        media_type = 1 if track_type == "video" else 2
-
-        left_info = {
-            "mediaPoolItem": media_item,
-            "startFrame": source_start,
-            "endFrame": source_start + left_len - 1,
-            "recordFrame": clip_start,
-            "trackIndex": int(info["track_index"]),
-            "mediaType": media_type,
-        }
-        right_info = {
-            "mediaPoolItem": media_item,
-            "startFrame": source_start + left_len,
-            "endFrame": source_start + total_len - 1,
-            "recordFrame": frame,
-            "trackIndex": int(info["track_index"]),
-            "mediaType": media_type,
-        }
-
-        # Preserve the Edit-page transform so the two halves look like the original.
+        if media is None or source_start is None:
+            raise OperationError("Resolve did not provide a media source range; nothing was changed.")
+        # Source extraction's range validation also catches detectable retiming.
+        self._source_window(item, start)
+        source_fps = call(media, "GetClipProperty", None, "FPS")
+        try:
+            if source_fps and abs(float(source_fps) - self._project_rate()) > 0.01:
+                raise OperationError("Mixed source/timeline frame rates cannot be split safely by reconstruction. Use Resolve's razor.")
+        except (TypeError, ValueError):
+            raise OperationError("Source frame rate could not be verified.")
+        checkpoint, checkpoint_info = self._duplicate_current("Before split", open_duplicate=False)
+        checkpoint_items = call(checkpoint, "GetItemListInTrack", [], info["track_type"], info["track_index"]) or []
+        # The checkpoint is verified in track order; retain the copied item for grade copying.
+        original_items = timeline.GetItemListInTrack(info["track_type"], info["track_index"]) or []
+        source_index = next((index for index, candidate in enumerate(original_items)
+                             if (info.get("unique_id") is not None and call(candidate, "GetUniqueId", None) == info.get("unique_id")) or candidate == item), None)
+        if source_index is None or source_index >= len(checkpoint_items):
+            raise OperationError("Could not identify the checkpoint clip; original was not removed.")
+        saved_item = checkpoint_items[source_index]
         transform = self._read_transform(item)
-
-        pool = self._media_pool()
+        color = call(item, "GetClipColor", "")
+        enabled = call(item, "GetClipEnabled", None)
+        source_start = int(source_start)
+        segments = []
+        for begin, finish in ((start, frame), (frame, end)):
+            segments.append({"mediaPoolItem": media, "startFrame": source_start + begin - start,
+                             "endFrame": source_start + finish - start - 1, "recordFrame": begin,
+                             "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2})
         if not timeline.DeleteClips([item], False):
-            raise OperationError("Resolve refused to remove the original clip, so nothing was cut.")
-
-        created = pool.AppendToTimeline([left_info, right_info]) or []
-        if len(created) < 2:
-            # Try to put the original back so a failed cut is not destructive.
-            recovery = {
-                "mediaPoolItem": media_item,
-                "startFrame": source_start,
-                "endFrame": source_start + total_len - 1,
-                "recordFrame": clip_start,
-                "trackIndex": int(info["track_index"]),
-                "mediaType": media_type,
-            }
-            pool.AppendToTimeline([recovery])
-            raise OperationError(
-                "Resolve rebuilt %d of 2 halves, so the cut was rolled back to the original clip. "
-                "This can happen if the neighbouring space is occupied." % len(created)
-            )
-
-        halves = []
-        for piece, when in zip(created, ("left", "right")):
-            self._apply_transform(piece, transform_params_from_props(transform))
-            halves.append({
-                "side": when,
-                "id": self._item_id_after_rebuild(timeline, piece),
-                "start": call(piece, "GetStart", None),
-                "end": call(piece, "GetEnd", None),
-                "duration": call(piece, "GetDuration", None),
-            })
-
-        return {
-            "original": info["id"],
-            "cut_frame": frame,
-            "halves": halves,
-            "transform_preserved": bool(transform),
-            "note": (
-                "Cut done by rebuilding the clip as two pieces. Position, scale, rotation, crop and "
-                "opacity were re-applied. Color-page grades and Fusion compositions on the original "
-                "are not copied onto the halves; re-grade if needed."
-            ),
-        }
+            raise OperationError("Resolve refused to remove the original clip. Checkpoint: %s." % checkpoint_info["name"])
+        try:
+            created = self._media_pool().AppendToTimeline(segments) or []
+            if len(created) != 2:
+                raise OperationError("Resolve created %d of 2 halves." % len(created))
+            for piece, segment in zip(created, segments):
+                expected_end = segment["recordFrame"] + segment["endFrame"] - segment["startFrame"] + 1
+                if call(piece, "GetStart", None) != segment["recordFrame"] or call(piece, "GetEnd", None) != expected_end:
+                    raise OperationError("Resolve rebuilt a half at an unexpected position or duration.")
+                _, rejected = self._apply_transform(piece, transform_params_from_props(transform))
+                if rejected:
+                    raise OperationError("Resolve rejected restored transforms: %s." % sorted(rejected))
+                if enabled is not None and not call(piece, "SetClipEnabled", False, enabled):
+                    raise OperationError("Could not restore clip enabled state.")
+                if color and not call(piece, "SetClipColor", False, color):
+                    raise OperationError("Could not restore clip color.")
+            # CopyGrades is part of the regular Resolve API, not a Studio AI feature.
+            grade_copied = bool(call(saved_item, "CopyGrades", False, created)) if info["track_type"] == "video" else None
+            if info["track_type"] == "video" and not grade_copied:
+                raise OperationError("Could not preserve the current color-grade layer.")
+        except Exception as exc:
+            reopened = bool(self._project().SetCurrentTimeline(checkpoint))
+            raise OperationError("Split failed: %s. Checkpoint '%s' contains the pre-edit timeline; %s. The attempted timeline may contain partial edits and has been retained."
+                                 % (exc, checkpoint_info["name"], "opened the checkpoint for recovery" if reopened else "open that checkpoint manually"))
+        return {"original": info["id"], "cut_frame": frame, "checkpoint": checkpoint_info,
+                "halves": [{"side": side, "id": self._item_id_after_rebuild(timeline, piece),
+                            "start": call(piece, "GetStart", None), "end": call(piece, "GetEnd", None), "duration": call(piece, "GetDuration", None)}
+                           for side, piece in zip(("left", "right"), created)],
+                "transform_preserved": True, "current_grade_layer_copied": grade_copied,
+                "note": "Checkpoint retained. Rebuilt halves preserve static transforms, enabled state, clip color and current grade layer. Other grade layers, audio links, clip markers, fades and keyframes are not guaranteed; compare with the checkpoint before continuing."}
 
     def _build_ease_func(self, easing_name):
         import math
@@ -2277,642 +2282,431 @@ class ResolveOperations:
             "preset": preset or None,
         }
 
+    def _source_window(self, item, timeline_frame):
+        """Normal-speed source mapping; refuse known retiming rather than guessing."""
+        fps = self._project_rate()
+        media = call(item, "GetMediaPoolItem", None)
+        source_fps = call(media, "GetClipProperty", None, "FPS")
+        try:
+            source_fps = float(source_fps)
+            if not math.isfinite(source_fps) or source_fps <= 0:
+                source_fps = fps
+        except (ValueError, TypeError):
+            source_fps = fps
+        start = float(call(item, "GetStart", 0) or 0)
+        end = float(call(item, "GetEnd", start) or start)
+        source_start = call(item, "GetSourceStartFrame", None)
+        if source_start is None:
+            source_start = call(item, "GetLeftOffset", 0) or 0
+        source_end = call(item, "GetSourceEndFrame", None)
+        if source_end is not None:
+            source_seconds = (float(source_end) - float(source_start) + 1) / source_fps
+            if abs(source_seconds - (end - start) / fps) > max(2 / source_fps, 2 / fps):
+                raise OperationError("Source extraction cannot map this retimed clip reliably. Use a rendered clip or normal-speed source.")
+        position = min(max(float(timeline_frame), start), end)
+        return float(source_start) / source_fps + (position - start) / fps, max(0, (end - position) / fps)
+
+    @staticmethod
+    def _ffmpeg_path():
+        """Find a user-installed decoder or the installer's optional private binary."""
+        import shutil
+        binary = os.environ.get("RESOLVE_AI_BRIDGE_FFMPEG") or shutil.which("ffmpeg")
+        if binary:
+            return binary
+        home = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+        try:
+            path = Path((home / "ffmpeg-path.txt").read_text(encoding="utf-8").strip())
+            return str(path) if path.is_file() and os.access(path, os.X_OK) else None
+        except OSError:
+            return None
+
+    @staticmethod
+    def _image_dimensions(path):
+        """Read PNG/JPEG dimensions without optional Python image libraries."""
+        import struct
+        with Path(path).open("rb") as handle:
+            header = handle.read(24)
+            if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) == 24:
+                return struct.unpack(">II", header[16:24])
+            if header[:2] == b"\xff\xd8":
+                handle.seek(2)
+                while True:
+                    byte = handle.read(1)
+                    if not byte:
+                        break
+                    if byte != b"\xff":
+                        continue
+                    marker = handle.read(1)
+                    while marker == b"\xff":
+                        marker = handle.read(1)
+                    if not marker or marker in (b"\xda", b"\xd9"):
+                        break
+                    if marker == b"\x01" or 0xD0 <= marker[0] <= 0xD8:
+                        continue
+                    length = handle.read(2)
+                    if len(length) != 2:
+                        break
+                    length = struct.unpack(">H", length)[0]
+                    if marker[0] in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                        data = handle.read(5)
+                        if len(data) == 5:
+                            height, width = struct.unpack(">HH", data[1:])
+                            return width, height
+                        break
+                    if length < 2:
+                        break
+                    handle.seek(length - 2, 1)
+        return None, None
+
     def _op_timeline_frame(self, params):
         import base64
         import shutil
         import subprocess
         import tempfile
-        import time
 
         timeline = self._timeline()
-        project = self._project()
         fps = self._project_rate()
-
-        # 1. Handle optional seek if timecode or frame was provided
         requested_tc = params.get("timecode")
         requested_frame = params.get("frame")
+        if requested_tc and requested_frame is not None:
+            raise OperationError("Pass timecode or frame, not both.")
+        if requested_frame is not None:
+            # Public frame inputs are absolute, like timeline_overview and split_clip.
+            start_tc = call(timeline, "GetStartTimecode", "00:00:00:00")
+            offset = int(requested_frame) - int(call(timeline, "GetStartFrame", 0) or 0)
+            requested_tc = self._frames_tc(self._tc_frames(start_tc, fps) + offset, fps, ";" in start_tc)
         if requested_tc:
-            timeline.SetCurrentTimecode(str(requested_tc).strip())
-        elif requested_frame is not None:
-            try:
-                f_int = int(requested_frame)
-                start_tc = call(timeline, "GetStartTimecode", "01:00:00:00")
-                start_f = self._tc_frames(start_tc, fps)
-                target_total_f = start_f + f_int
-                r_fps = max(1, int(round(fps)))
-                hrs = target_total_f // (3600 * r_fps)
-                rem = target_total_f % (3600 * r_fps)
-                mins = rem // (60 * r_fps)
-                rem = rem % (60 * r_fps)
-                secs = rem // r_fps
-                frames = rem % r_fps
-                tc_str = "%02d:%02d:%02d:%02d" % (hrs, mins, secs, frames)
-                timeline.SetCurrentTimecode(tc_str)
-            except Exception:
-                pass
-
+            self._tc_frames(requested_tc, fps)
+            if not timeline.SetCurrentTimecode(str(requested_tc)):
+                raise OperationError("Resolve refused to seek to %s." % requested_tc)
         current_tc = call(timeline, "GetCurrentTimecode", "00:00:00:00")
-        current_frame = self._current_marker_frame(timeline)
-        max_width = int(params.get("max_width") or 1280)
+        current_frame = self._playhead_frame(timeline)
         mode = str(params.get("mode", "auto")).lower()
+        if mode not in ("auto", "source", "composite"):
+            raise OperationError("mode must be auto, source, or composite.")
         fmt = str(params.get("format", "jpg")).lower().lstrip(".")
-        if fmt not in ("jpg", "jpeg", "png"):
+        if fmt == "jpeg":
             fmt = "jpg"
-
+        if fmt not in ("png", "jpg"):
+            raise OperationError("format must be jpg or png.")
+        max_width = int(params.get("max_width", 1280))
         capture_dir = Path(tempfile.gettempdir()) / "resolve-frame-captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
-        temp_img = capture_dir / ("frame_%d_%s.%s" % (int(time.time() * 1000), current_tc.replace(":", "_"), fmt))
-
-        extracted = False
-        method_used = "unknown"
+        path = capture_dir / ("frame_%s.%s" % (uuid.uuid4().hex, fmt))
+        method = None
         clip_name = None
-
-        # Attempt Tier 1: Native Direct Export (if mode is auto or composite)
         if mode in ("auto", "composite"):
+            if call(self._project(), "ExportCurrentFrameAsStill", False, str(path)) and path.exists() and path.stat().st_size:
+                method = "export_current_frame_as_still"
+        if method is None and mode in ("auto", "source"):
+            item, info = self._resolve_one_item("playhead")
+            clip_name = info.get("name")
+            media = call(item, "GetMediaPoolItem", None)
+            file_path = call(media, "GetClipProperty", "", "File Path")
+            if not file_path or not Path(file_path).is_file():
+                raise OperationError("The visible clip has no readable source file. Source fallback cannot capture generators or offline media.")
+            source_seconds, _ = self._source_window(item, current_frame) if Path(file_path).suffix.lower() not in IMAGE_SUFFIXES else (0.0, 0.0)
+            ffmpeg = self._ffmpeg_path()
+            if not ffmpeg:
+                raise OperationError("Source capture needs ffmpeg on PATH (Free-compatible). Composite capture was unavailable.")
             try:
-                ok = call(project, "ExportCurrentFrameAsStill", False, str(temp_img))
-                if ok and temp_img.exists() and temp_img.stat().st_size > 0:
-                    extracted = True
-                    method_used = "export_current_frame_as_still"
-            except Exception:
-                pass
-
-        # Attempt Tier 2: Source Media Hardware Offset (if Tier 1 didn't succeed or mode is source)
-        if not extracted and mode in ("auto", "source"):
-            video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
-            target_item = None
-            for t_idx in range(video_tracks, 0, -1):
-                if not call(timeline, "GetIsTrackEnabled", True, "video", t_idx):
-                    continue
-                track_items = call(timeline, "GetItemListInTrack", [], "video", t_idx) or []
-                for item in track_items:
-                    start_f = call(item, "GetStart", None)
-                    end_f = call(item, "GetEnd", None)
-                    if start_f is not None and end_f is not None and start_f <= current_frame < end_f:
-                        target_item = item
-                        break
-                if target_item is not None:
-                    break
-
-            if target_item is not None:
-                clip_name = call(target_item, "GetName", "")
-                media_item = call(target_item, "GetMediaPoolItem", None)
-                file_path = call(media_item, "GetClipProperty", "", "File Path") if media_item else ""
-                if file_path and Path(file_path).exists():
-                    left_offset = call(target_item, "GetLeftOffset", 0) or 0
-                    start_f = call(target_item, "GetStart", 0) or 0
-                    source_frame = (current_frame - start_f) + left_offset
-                    source_sec = max(0.0, float(source_frame) / max(1.0, fps))
-
-                    try:
-                        import cv2
-                        cap = cv2.VideoCapture(str(file_path))
-                        if cap.isOpened():
-                            cap.set(cv2.CAP_PROP_POS_MSEC, source_sec * 1000.0)
-                            ret, frame_img = cap.read()
-                            cap.release()
-                            if ret and frame_img is not None:
-                                cv2.imwrite(str(temp_img), frame_img, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-                                if temp_img.exists() and temp_img.stat().st_size > 0:
-                                    extracted = True
-                                    method_used = "source_math_cv2"
-                    except Exception:
-                        pass
-
-                    if not extracted:
-                        ffmpeg_bin = shutil.which("ffmpeg")
-                        if ffmpeg_bin:
-                            cmd = [
-                                ffmpeg_bin, "-y", "-ss", f"{source_sec:.3f}",
-                                "-i", str(file_path), "-vframes", "1",
-                                "-q:v", "2", str(temp_img)
-                            ]
-                            res = subprocess.run(cmd, capture_output=True)
-                            if res.returncode == 0 and temp_img.exists() and temp_img.stat().st_size > 0:
-                                extracted = True
-                                method_used = "source_math_ffmpeg"
-
-        if not extracted:
-            raise OperationError(
-                "Could not capture timeline frame at %s. Ensure Resolve is open with active media."
-                % current_tc
-            )
-
-        width, height = 1920, 1080
-        if max_width > 0:
-            try:
-                import cv2
-                img = cv2.imread(str(temp_img))
-                if img is not None:
-                    orig_h, orig_w = img.shape[:2]
-                    if orig_w > max_width:
-                        ratio = max_width / float(orig_w)
-                        new_h = int(orig_h * ratio)
-                        resized = cv2.resize(img, (max_width, new_h), interpolation=cv2.INTER_AREA)
-                        cv2.imwrite(str(temp_img), resized, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-                        width, height = max_width, new_h
-                    else:
-                        width, height = orig_w, orig_h
-            except Exception:
-                pass
-
-        with open(temp_img, "rb") as f:
-            raw_bytes = f.read()
-        b64_data = base64.b64encode(raw_bytes).decode("ascii")
-
-        return {
-            "timecode": current_tc,
-            "frame": current_frame,
-            "clip_name": clip_name,
-            "method": method_used,
-            "width": width,
-            "height": height,
-            "format": fmt,
-            "image_base64": b64_data,
-            "file_path": str(temp_img),
-        }
+                result = subprocess.run([ffmpeg, "-v", "error", "-y", "-ss", "%.9f" % source_seconds, "-i", str(file_path), "-frames:v", "1", str(path)], capture_output=True, timeout=45)
+            except subprocess.TimeoutExpired:
+                raise OperationError("Source frame extraction timed out.")
+            if result.returncode == 0 and path.exists() and path.stat().st_size:
+                method = "source_ffmpeg"
+        if method is None:
+            raise OperationError("Composite capture is unavailable on this Resolve build. Try mode='source' with ffmpeg installed; source images exclude timeline effects.")
+        width, height = self._image_dimensions(path)
+        resized = False
+        if width and max_width > 0 and width > max_width:
+            target = path.with_name(path.stem + "_small" + path.suffix)
+            ffmpeg = self._ffmpeg_path()
+            sips = shutil.which("sips")
+            command = ([ffmpeg, "-v", "error", "-y", "-i", str(path), "-vf", "scale=%d:-1" % max_width, str(target)] if ffmpeg else
+                       [sips, "--resampleWidth", str(max_width), str(path), "--out", str(target)] if sips else None)
+            if command:
+                try:
+                    result = subprocess.run(command, capture_output=True, timeout=30)
+                    if result.returncode == 0 and target.exists() and target.stat().st_size:
+                        path.unlink()
+                        path = target
+                        width, height = self._image_dimensions(path)
+                        resized = True
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        return {"timecode": current_tc, "frame": current_frame, "frame_space": "absolute_timeline",
+                "clip_name": clip_name, "method": method, "composited": method == "export_current_frame_as_still",
+                "note": "Source fallback excludes grades, Fusion, transforms, overlays and timeline retiming." if method == "source_ffmpeg" else "Native timeline still.",
+                "width": width, "height": height, "resized": resized, "format": fmt,
+                "image_base64": base64.b64encode(path.read_bytes()).decode("ascii"), "file_path": str(path)}
 
     def _op_timeline_audio(self, params):
-        import math
+        import array
         import shutil
-        import struct
         import subprocess
+        import sys
         import tempfile
-        import time
         import wave
 
         timeline = self._timeline()
         fps = self._project_rate()
         action = str(params.get("action", "analyze")).lower()
-        threshold_db = float(params.get("silence_threshold_db", -40.0))
-        min_silence_duration = float(params.get("min_silence_duration", 0.3))
-        track_index = int(params.get("track_index", 1)) if "track_index" in params else None
-
-        # 1. Determine target item or active playhead frame
-        requested_item_id = params.get("item_id")
-        if requested_item_id:
-            target_item, _ = self._find_timeline_items([requested_item_id])[0]
-            target_track_type = "audio"
-        else:
-            target_item = None
-
-        requested_tc = params.get("timecode")
-        if requested_tc:
-            timeline.SetCurrentTimecode(str(requested_tc).strip())
+        actions = ("analyze", "silence_cuts", "energy_envelope", "onsets", "vad_clusters", "export_slice")
+        if action not in actions:
+            raise OperationError("Unknown audio action. Choose: %s" % ", ".join(actions))
         current_frame = self._playhead_frame(timeline)
-        current_tc = call(timeline, "GetCurrentTimecode", "00:00:00:00")
-
-        # 2. Find target audio or video clip on timeline covering playhead
-        if target_item is None:
-            target_track_type = "audio"
-            audio_tracks = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
-            video_tracks = int(call(timeline, "GetTrackCount", 0, "video") or 0)
-
-            # Check audio tracks first
-            track_search_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
-            for a_idx in track_search_range:
-                items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
-                for item in items:
-                    s = call(item, "GetStart", None)
-                    e = call(item, "GetEnd", None)
-                    if s is not None and e is not None and s <= current_frame < e:
-                        # Ensure media pool item has accessible file on disk
-                        mp = item.GetMediaPoolItem()
-                        fp = (call(mp, "GetClipProperty", {}) or {}).get("File Path")
-                        if fp and Path(fp).exists():
-                            target_item = item
-                            target_track_type = "audio"
-                            break
-                if target_item is not None:
-                    break
-
-            # If not under playhead in audio tracks, check video tracks
-            if target_item is None:
-                v_search_range = [track_index] if (track_index and 1 <= track_index <= video_tracks) else range(1, video_tracks + 1)
-                for v_idx in v_search_range:
-                    items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
-                    for item in items:
-                        s = call(item, "GetStart", None)
-                        e = call(item, "GetEnd", None)
-                        if s is not None and e is not None and s <= current_frame < e:
-                            target_item = item
-                            target_track_type = "video"
-                            break
-                    if target_item is not None:
-                        break
-
-            # Fallback to first available clip with media on disk
-            if target_item is None:
-                a_fallback_range = [track_index] if (track_index and 1 <= track_index <= audio_tracks) else range(1, audio_tracks + 1)
-                for a_idx in a_fallback_range:
-                    items = call(timeline, "GetItemListInTrack", [], "audio", a_idx) or []
-                    for it in items:
-                        mp = it.GetMediaPoolItem()
-                        fp = (call(mp, "GetClipProperty", {}) or {}).get("File Path")
-                        if fp and Path(fp).exists():
-                            target_item = it
-                            target_track_type = "audio"
-                            break
-                    if target_item is not None:
-                        break
-            if target_item is None:
-                for v_idx in range(1, video_tracks + 1):
-                    items = call(timeline, "GetItemListInTrack", [], "video", v_idx) or []
-                    if items:
-                        target_item = items[0]
-                        target_track_type = "video"
-                        break
-
-        if target_item is None:
-            raise OperationError("No audio or video clips found on the active timeline.")
-
-        clip_name = call(target_item, "GetName", "")
-        media_item = call(target_item, "GetMediaPoolItem", None)
-        file_path = call(media_item, "GetClipProperty", "", "File Path") if media_item else ""
-
-        if not file_path or not Path(file_path).exists():
-            raise OperationError("Media file for clip '%s' is offline or missing on disk." % clip_name)
-
-        # 3. Calculate exact trimmed source offset
-        clip_start = call(target_item, "GetStart", 0) or 0
-        clip_end = call(target_item, "GetEnd", 0) or 0
-        clip_duration = call(target_item, "GetDuration", 0) or max(1, clip_end - clip_start)
-        left_offset = call(target_item, "GetLeftOffset", 0) or 0
-
-        # Calculate where in the source media file the active playhead is
-        if clip_start <= current_frame < clip_end:
-            source_frame_start = (current_frame - clip_start) + left_offset
-            remaining_frames = clip_end - current_frame
+        requested = params.get("item_id")
+        if requested:
+            target, info = self._find_timeline_items([requested])[0]
         else:
-            source_frame_start = left_offset
-            remaining_frames = clip_duration
-
-        source_start_sec = max(0.0, float(source_frame_start) / max(1.0, fps))
-        duration_sec = max(0.1, float(remaining_frames) / max(1.0, fps))
-
-        # Extract to temporary WAV file using afconvert or ffmpeg
+            track = int(params.get("track_index", 1))
+            candidates = [(item, info) for item, info in self._timeline_items()
+                          if info["track_type"] in ("audio", "video") and info["track_index"] == track
+                          and info.get("enabled") is not False
+                          and call(timeline, "GetIsTrackEnabled", True, info["track_type"], track) is not False
+                          and float(info["start"]) <= current_frame < float(info["end"])]
+            candidates.sort(key=lambda pair: pair[1]["track_type"] != "audio")
+            if not candidates:
+                raise OperationError("No enabled audio/video clip under the playhead on track %d. Pass an explicit item_id." % track)
+            target, info = candidates[0]
+        media = call(target, "GetMediaPoolItem", None)
+        file_path = call(media, "GetClipProperty", "", "File Path")
+        if not file_path or not Path(file_path).is_file():
+            raise OperationError("Selected clip has no readable source audio file.")
+        clip_start = float(call(target, "GetStart", 0) or 0)
+        clip_end = float(call(target, "GetEnd", 0) or 0)
+        origin = current_frame if clip_start <= current_frame < clip_end else clip_start
+        if params.get("whole_clip"):
+            origin = clip_start
+        source_seconds, duration = self._source_window(target, origin)
+        max_seconds = float(params.get("max_duration_seconds", 300))
+        if not math.isfinite(max_seconds) or not 0 < max_seconds <= 3600:
+            raise OperationError("max_duration_seconds must be between 0 and 3600.")
+        duration = min(duration, max_seconds)
+        if duration <= 0:
+            raise OperationError("The selected source range is empty.")
+        threshold = float(params.get("silence_threshold_db", -40))
+        minimum = float(params.get("min_silence_duration", 0.3))
+        if not math.isfinite(threshold) or not -120 <= threshold <= 0 or not math.isfinite(minimum) or minimum < 0:
+            raise OperationError("Use a finite threshold from -120 to 0 dBFS and a nonnegative silence duration.")
         audio_dir = Path(tempfile.gettempdir()) / "resolve-audio-analysis"
         audio_dir.mkdir(parents=True, exist_ok=True)
-        temp_wav = audio_dir / ("audio_%d.wav" % int(time.time() * 1000))
-
-        extracted = False
-        afconvert_bin = shutil.which("afconvert")
-        if afconvert_bin:
-            cmd = [afconvert_bin, "-f", "WAVE", "-d", "LEI16@48000", "-c", "2", str(file_path), str(temp_wav)]
-            res = subprocess.run(cmd, capture_output=True)
-            if res.returncode == 0 and temp_wav.exists() and temp_wav.stat().st_size > 44:
-                extracted = True
-
-        if not extracted:
-            ffmpeg_bin = shutil.which("ffmpeg")
-            if ffmpeg_bin:
-                cmd = [ffmpeg_bin, "-y", "-i", str(file_path), "-vn", "-ac", "2", "-ar", "48000", "-f", "wav", str(temp_wav)]
-                res = subprocess.run(cmd, capture_output=True)
-                if res.returncode == 0 and temp_wav.exists() and temp_wav.stat().st_size > 44:
-                    extracted = True
-
-        if not extracted:
-            raise OperationError("Could not decode audio from media file '%s'." % file_path)
-
-        # Read only the trimmed playhead slice
-        with wave.open(str(temp_wav), "rb") as wf:
-            channels = wf.getnchannels()
-            sample_rate = wf.getframerate()
-            total_wav_frames = wf.getnframes()
-
-            start_wav_pos = min(total_wav_frames, max(0, int(source_start_sec * sample_rate)))
-            frames_to_read = min(total_wav_frames - start_wav_pos, int(duration_sec * sample_rate))
-
-            wf.setpos(start_wav_pos)
-            raw_bytes = wf.readframes(frames_to_read)
-
-        num_samples = len(raw_bytes) // (2 * channels)
-        fmt = "<%dh" % (num_samples * channels)
-        raw_ints = struct.unpack(fmt, raw_bytes)
-
-        if channels == 1:
-            samples = [s / 32768.0 for s in raw_ints]
-        else:
-            samples = [((raw_ints[i * 2] + raw_ints[i * 2 + 1]) / 2.0) / 32768.0 for i in range(num_samples)]
-
-        slice_duration = len(samples) / float(sample_rate)
-
-        # Write trimmed slice to a dedicated WAV file for inspection / AI transcription
-        slice_wav = audio_dir / ("slice_%d_%s.wav" % (int(time.time() * 1000), current_tc.replace(":", "_")))
-        with wave.open(str(slice_wav), "wb") as wf_out:
-            wf_out.setnchannels(channels)
-            wf_out.setsampwidth(2)
-            wf_out.setframerate(sample_rate)
-            wf_out.writeframes(raw_bytes)
-
-        duration = slice_duration
-
-        # 1. Action: analyze
+        slice_path = audio_dir / ("slice_%s.wav" % uuid.uuid4().hex)
+        full_path = audio_dir / ("decode_%s.wav" % uuid.uuid4().hex)
+        ffmpeg, afconvert = self._ffmpeg_path(), shutil.which("afconvert")
+        try:
+            if ffmpeg:
+                command = [ffmpeg, "-v", "error", "-y", "-ss", "%.9f" % source_seconds, "-i", str(file_path), "-t", "%.9f" % duration,
+                           "-vn", "-acodec", "pcm_s16le", "-ar", "48000", str(slice_path)]
+                result = subprocess.run(command, capture_output=True, timeout=90)
+                if result.returncode:
+                    raise OperationError("ffmpeg could not decode the selected audio range: %s" % result.stderr.decode(errors="replace")[-500:])
+            elif afconvert:
+                result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16@48000", str(file_path), str(full_path)], capture_output=True, timeout=90)
+                if result.returncode:
+                    raise OperationError("afconvert could not decode audio. Install ffmpeg for additional formats.")
+                with wave.open(str(full_path), "rb") as source:
+                    source.setpos(min(source.getnframes(), round(source_seconds * source.getframerate())))
+                    raw = source.readframes(round(duration * source.getframerate()))
+                    with wave.open(str(slice_path), "wb") as output:
+                        output.setparams(source.getparams())
+                        output.writeframes(raw)
+            else:
+                raise OperationError("Audio analysis requires ffmpeg or macOS afconvert; neither requires Resolve Studio.")
+            with wave.open(str(slice_path), "rb") as source:
+                channels, rate = source.getnchannels(), source.getframerate()
+                if source.getsampwidth() != 2:
+                    raise OperationError("Decoder did not return 16-bit PCM audio.")
+                samples = array.array("h", source.readframes(source.getnframes()))
+                if sys.byteorder != "little":
+                    samples.byteswap()
+        except subprocess.TimeoutExpired:
+            slice_path.unlink(missing_ok=True)
+            raise OperationError("Audio decoding timed out; select a shorter source or install ffmpeg for efficient range decoding.")
+        except Exception:
+            slice_path.unlink(missing_ok=True)
+            raise
+        finally:
+            full_path.unlink(missing_ok=True)
+        count = len(samples) // channels
+        if not count:
+            slice_path.unlink(missing_ok=True)
+            raise OperationError("No audio samples were decoded in the selected range.")
+        duration = count / rate
+        report = {"action": action, "item_id": info.get("id"), "clip_name": call(target, "GetName", ""),
+                  "track_type": info.get("track_type"), "timecode": call(timeline, "GetCurrentTimecode", None),
+                  "source_start_sec": source_seconds, "timeline_start_frame": origin, "frame_rate": fps,
+                  "duration_sec": duration, "sample_rate": rate, "channels": channels,
+                  "truncated": duration + 1 / fps < (clip_end - origin) / fps,
+                  "scope": "source_audio", "note": "Source PCM only: excludes timeline gain, mute, fades, Fairlight effects, mixing and Fusion retiming."}
+        def db(value):
+            return 20 * math.log10(max(1e-6, value))
+        def windows(seconds):
+            size = max(1, round(rate * seconds))
+            for begin in range(0, count, size):
+                finish = min(count, begin + size)
+                block = samples[begin * channels:finish * channels]
+                energy = sum(float(s) * s for s in block) / len(block) / (32768.0 ** 2)
+                yield begin / rate, finish / rate, db(math.sqrt(energy))
+        def interval(begin, finish):
+            relative_start, relative_end = round(begin * fps), round(finish * fps)
+            return {"start_sec": begin, "end_sec": finish, "duration_sec": finish - begin,
+                    "start_frame": relative_start, "end_frame": relative_end,
+                    "timeline_start_frame": origin + relative_start, "timeline_end_frame": origin + relative_end}
         if action == "analyze":
-            peak_val = max(abs(s) for s in samples) if samples else 0.0
-            sum_sq = sum(s * s for s in samples) if samples else 0.0
-            rms_val = math.sqrt(sum_sq / len(samples)) if samples else 0.0
-            peak_db = 20.0 * math.log10(max(1e-6, peak_val))
-            rms_db = 20.0 * math.log10(max(1e-6, rms_val))
-            return {
-                "action": "analyze",
-                "clip_name": clip_name,
-                "track_type": target_track_type,
-                "timecode": current_tc,
-                "source_start_sec": round(source_start_sec, 3),
-                "duration_sec": round(duration, 3),
-                "sample_rate": sample_rate,
-                "channels": channels,
-                "peak_dbfs": round(peak_db, 2),
-                "rms_dbfs": round(rms_db, 2),
-                "is_clipping": bool(peak_db >= -0.05),
-                "health": "healthy" if peak_db < -0.5 and rms_db > -35.0 else "warning_loud" if peak_db >= -0.5 else "warning_quiet",
-                "wav_path": str(slice_wav),
-            }
-
-        # 2. Action: silence_cuts
-        elif action == "silence_cuts":
-            window_size = int(sample_rate * 0.05)
-            num_windows = len(samples) // window_size
-            silent_windows = []
-            for i in range(num_windows):
-                chunk = samples[i * window_size : (i + 1) * window_size]
-                chunk_rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
-                chunk_db = 20.0 * math.log10(max(1e-6, chunk_rms))
-                silent_windows.append(chunk_db <= threshold_db)
-
-            cuts = []
-            in_silence = False
-            interval_start = 0.0
-            for i, is_silent in enumerate(silent_windows):
-                curr_t = i * 0.05
-                if is_silent and not in_silence:
-                    in_silence = True
-                    interval_start = curr_t
-                elif not is_silent and in_silence:
-                    in_silence = False
-                    d = curr_t - interval_start
-                    if d >= min_silence_duration:
-                        # Convert to timecode
-                        s_f = int(interval_start * fps)
-                        e_f = int(curr_t * fps)
-                        cuts.append({
-                            "start_sec": round(interval_start, 3),
-                            "end_sec": round(curr_t, 3),
-                            "duration_sec": round(d, 3),
-                            "start_frame": s_f,
-                            "end_frame": e_f,
-                        })
-            return {
-                "action": "silence_cuts",
-                "clip_name": clip_name,
-                "threshold_db": threshold_db,
-                "silence_intervals_count": len(cuts),
-                "cuts": cuts,
-            }
-
-        # 3. Action: energy_envelope
+            levels = []
+            for channel in range(channels):
+                values = samples[channel::channels]
+                peak = max(abs(v) for v in values) / 32768.0
+                rms = math.sqrt(sum(float(v) * v for v in values) / len(values)) / 32768.0
+                levels.append({"channel": channel + 1, "peak_dbfs": round(db(peak), 2), "rms_dbfs": round(db(rms), 2), "is_clipping": peak >= 32767 / 32768})
+            peak = max(level["peak_dbfs"] for level in levels)
+            rms = db(math.sqrt(sum(float(v) * v for v in samples) / len(samples)) / 32768.0)
+            report.update(peak_dbfs=peak, rms_dbfs=round(rms, 2), is_clipping=any(level["is_clipping"] for level in levels),
+                          channel_levels=levels, health="warning_loud" if peak >= -0.5 else "warning_quiet" if rms <= -35 else "healthy")
+        elif action in ("silence_cuts", "vad_clusters"):
+            speech = action == "vad_clusters"
+            boundary = float(params.get("threshold_db", -34)) if speech else threshold
+            if not math.isfinite(boundary):
+                raise OperationError("threshold_db must be finite.")
+            regions, beginning = [], None
+            for begin, finish, level in windows(0.05):
+                selected = level > boundary if speech else level <= boundary
+                if selected and beginning is None:
+                    beginning = begin
+                if not selected and beginning is not None:
+                    if begin - beginning + 1e-9 >= (0 if speech else minimum):
+                        regions.append(interval(beginning, begin))
+                    beginning = None
+            if beginning is not None and duration - beginning + 1e-9 >= (0 if speech else minimum):
+                regions.append(interval(beginning, duration))
+            report.update(threshold_db=boundary, frame_space="slice_relative; timeline_* fields are absolute", end_exclusive=True)
+            report.update({"clusters" if speech else "cuts": regions, "clusters_count" if speech else "silence_intervals_count": len(regions)})
         elif action == "energy_envelope":
-            window_size = max(1, int(sample_rate * 0.05))
-            num_windows = len(samples) // window_size
-            envelope = []
-            for i in range(min(num_windows, 200)):
-                chunk = samples[i * window_size : (i + 1) * window_size]
-                chunk_rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
-                chunk_db = 20.0 * math.log10(max(1e-6, chunk_rms))
-                envelope.append({"time_sec": round(i * 0.05, 2), "rms_dbfs": round(chunk_db, 1)})
-            return {
-                "action": "energy_envelope",
-                "clip_name": clip_name,
-                "samples_count": len(envelope),
-                "envelope": envelope,
-            }
-
-        # 4. Action: onsets
+            envelope = [{"time_sec": begin, "rms_dbfs": round(level, 2)} for begin, _, level in windows(0.05)]
+            report.update(envelope=envelope, samples_count=len(envelope))
         elif action == "onsets":
-            lead_ms = float(params.get("lead_offset_ms", 160.0))
-            window_size = int(sample_rate * 0.01)
-            num_windows = len(samples) // max(1, window_size)
-            energies = [sum(s * s for s in samples[i * window_size : (i + 1) * window_size]) for i in range(num_windows)]
-            onsets = []
-            lead_sec = lead_ms / 1000.0
-            for i in range(1, len(energies) - 1):
-                diff = energies[i] - energies[i - 1]
-                if diff > 0.04 and energies[i] > 0.008:
-                    t = max(0.0, (i * 0.01) - lead_sec)
-                    onsets.append({
-                        "onset_sec": round(t, 3),
-                        "frame": int(round(t * fps)),
-                        "energy_delta": round(diff, 4)
-                    })
-            return {
-                "action": "onsets",
-                "clip_name": clip_name,
-                "lead_offset_ms": lead_ms,
-                "onsets_count": len(onsets),
-                "onsets": onsets[:50]
-            }
-
-        # 5. Action: vad_clusters
-        elif action == "vad_clusters":
-            threshold_db = float(params.get("threshold_db", -34.0))
-            frame_samples = max(1, int(sample_rate / fps))
-            num_frames = len(samples) // frame_samples
-            clusters = []
-            in_speech = False
-            c_start = 0
-            for f in range(num_frames):
-                chunk = samples[f * frame_samples : (f + 1) * frame_samples]
-                rms = math.sqrt(sum(s * s for s in chunk) / len(chunk))
-                db = 20.0 * math.log10(max(1e-6, rms))
-                is_speech = (db > threshold_db)
-                if is_speech and not in_speech:
-                    in_speech = True
-                    c_start = f
-                elif not is_speech and in_speech:
-                    in_speech = False
-                    clusters.append({"start_frame": c_start, "end_frame": f - 1, "start_sec": round(c_start / fps, 3), "end_sec": round((f - 1) / fps, 3)})
-            if in_speech:
-                clusters.append({"start_frame": c_start, "end_frame": num_frames - 1, "start_sec": round(c_start / fps, 3), "end_sec": round((num_frames - 1) / fps, 3)})
-            return {
-                "action": "vad_clusters",
-                "clip_name": clip_name,
-                "threshold_db": threshold_db,
-                "clusters_count": len(clusters),
-                "clusters": clusters
-            }
-
-        # 6. Action: export_slice
-        elif action == "export_slice":
-            return {
-                "action": "export_slice",
-                "clip_name": clip_name,
-                "wav_path": str(temp_wav),
-                "duration_sec": round(duration, 3),
-            }
-
-        raise OperationError("Unknown audio action '%s'. Valid actions: analyze, silence_cuts, energy_envelope, onsets, vad_clusters, export_slice" % action)
+            previous, onsets = -120, []
+            lead = float(params.get("lead_offset_ms", 160)) / 1000
+            if not math.isfinite(lead):
+                raise OperationError("lead_offset_ms must be finite.")
+            for begin, _, level in windows(0.01):
+                if level > -34 and level - previous > 6:
+                    moment = max(0, begin - lead)
+                    onsets.append({"onset_sec": moment, "frame": round(moment * fps), "timeline_frame": origin + round(moment * fps)})
+                previous = level
+            report.update(onsets=onsets, onsets_count=len(onsets), lead_offset_ms=lead * 1000)
+        if action in ("analyze", "export_slice"):
+            report["wav_path"] = str(slice_path)
+        else:
+            slice_path.unlink(missing_ok=True)
+        return report
 
     def _op_change_clip_speed(self, params):
         item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index") or "video")
-
-        if info.get("track_type") == "audio":
-            raise OperationError(
-                "change_clip_speed currently supports video clips. DaVinci Resolve does not process "
-                "audio in Fusion compositions; audio speed changes must be made via Fairlight or clip pitch/retime."
-            )
-
-        speed = params.get("speed")
-        if speed is None:
-            speed = params.get("speed_multiplier")
-        if speed is None and params.get("speed_percent") is not None:
-            try:
-                speed = float(params["speed_percent"]) / 100.0
-            except (ValueError, TypeError):
-                pass
-        if speed is None and params.get("slow_down_percent") is not None:
-            try:
-                speed = 1.0 - (float(params["slow_down_percent"]) / 100.0)
-            except (ValueError, TypeError):
-                pass
-        if speed is None and params.get("speed_up_percent") is not None:
-            try:
-                speed = 1.0 + (float(params["speed_up_percent"]) / 100.0)
-            except (ValueError, TypeError):
-                pass
-
-        if speed is None:
-            raise OperationError("speed (e.g. 0.75), speed_percent (e.g. 75), or slow_down_percent (e.g. 25) is required.")
-
+        if info.get("track_type") != "video":
+            raise OperationError("Fusion speed changes support video only; linked audio is unchanged.")
+        supplied = [(key, params[key]) for key in ("speed", "speed_multiplier", "speed_percent", "slow_down_percent", "speed_up_percent") if params.get(key) is not None]
+        if len(supplied) != 1:
+            raise OperationError("Provide exactly one speed value: speed, speed_percent, slow_down_percent, or speed_up_percent.")
+        key, value = supplied[0]
         try:
-            speed = float(speed)
+            speed = float(value)
+            if key == "speed_percent":
+                speed /= 100
+            elif key == "slow_down_percent":
+                speed = 1 - speed / 100
+            elif key == "speed_up_percent":
+                speed = 1 + speed / 100
         except (ValueError, TypeError):
-            raise OperationError("Invalid speed value: %s" % speed)
-
-        if speed <= 0.0:
-            raise OperationError("speed must be a positive number greater than 0.")
-
+            raise OperationError("Invalid speed value.")
+        if not math.isfinite(speed) or speed <= 0:
+            raise OperationError("speed must be finite and greater than zero.")
         method = str(params.get("method", "fusion")).lower()
         reverse = bool(params.get("reverse", False))
-
         if method in ("clip_attributes", "media_pool", "fps"):
-            mpi = item.GetMediaPoolItem()
-            if not mpi:
-                raise OperationError("Clip %s has no Media Pool item to modify frame rate." % info.get("id"))
-            fps = self._project_rate()
-            # In Resolve clip attributes, conforming higher FPS footage to timeline rate produces slow motion (e.g. 24 / 0.75 = 32 fps).
-            new_fps = round(fps / speed, 3)
-            ok = call(mpi, "SetClipProperty", False, "FPS", str(new_fps))
-            if not ok:
-                raise OperationError("Resolve refused to update clip FPS to %s." % new_fps)
-            return {
-                "item_id": info["id"],
-                "name": info.get("name"),
-                "method": "clip_attributes_fps",
-                "speed": speed,
-                "speed_percent": round(speed * 100.0, 1),
-                "timeline_fps": fps,
-                "clip_fps": new_fps,
-            }
-
-        # Default method: Fusion native TimeSpeed
-        comp = item.GetFusionCompByIndex(1)
+            if reverse:
+                raise OperationError("Clip FPS attributes cannot reverse playback.")
+            media = call(item, "GetMediaPoolItem", None)
+            try:
+                original_fps = float(call(media, "GetClipProperty", None, "FPS"))
+            except (ValueError, TypeError):
+                raise OperationError("Resolve did not report the source frame rate.")
+            new_fps = round(original_fps * speed, 6)
+            if not math.isfinite(new_fps) or new_fps <= 0 or not call(media, "SetClipProperty", False, "FPS", str(new_fps)):
+                raise OperationError("Resolve refused the new source frame rate.")
+            actual = call(media, "GetClipProperty", None, "FPS")
+            if actual is None or abs(float(actual) - new_fps) > 0.01:
+                raise OperationError("Clip FPS read-back differs from the request. Inspect clip attributes before continuing.")
+            return {"item_id": info["id"], "method": "clip_attributes_fps", "speed": speed,
+                    "previous_clip_fps": original_fps, "clip_fps": actual,
+                    "scope": "media_pool", "note": "Changes source interpretation for EVERY use of this media, relative to its current FPS. Does not provide a per-clip reset."}
+        if method != "fusion":
+            raise OperationError("method must be fusion or clip_attributes.")
+        if reverse:
+            raise OperationError("Reverse TimeSpeed source-range mapping is not verified; use Resolve's Change Clip Speed dialog for reverse playback.")
+        comp = call(item, "GetFusionCompByIndex", None, 1)
+        if not comp and abs(speed - 1) < 1e-9:
+            return {"item_id": info["id"], "speed": 1.0, "changed": False, "note": "No bridge-owned speed node to reset."}
+        comp = comp or call(item, "AddFusionComp", None)
         if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            raise OperationError("Could not access or create Fusion composition for clip %s." % info.get("id"))
-
+            raise OperationError("Could not access this clip's Fusion composition.")
+        owner = "resolve-ai-bridge.change_clip_speed.v1"
         comp.Lock()
+        created = False
+        node = None
+        output_input = None
+        previous_output = None
         try:
-            media_in = comp.FindTool("MediaIn1")
-            media_out = comp.FindTool("MediaOut1")
-            if not media_in or not media_out:
-                tools = comp.GetToolList(False) or {}
-                tool_list = list(tools.values()) if isinstance(tools, dict) else list(tools)
-                for t in tool_list:
-                    reg_id = str(call(t, "GetAttrs", "", "TOOLS_RegID"))
-                    if reg_id == "MediaIn":
-                        media_in = t
-                    elif reg_id == "MediaOut":
-                        media_out = t
-
-            if not media_in or not media_out:
-                raise OperationError("Fusion composition for clip %s lacks MediaIn/MediaOut nodes." % info.get("id"))
-
-            ts = comp.FindTool("TimeSpeed1")
-            if not ts:
-                tools = comp.GetToolList(False) or {}
-                tool_list = list(tools.values()) if isinstance(tools, dict) else list(tools)
-                for t in tool_list:
-                    if str(call(t, "GetAttrs", "", "TOOLS_RegID")) == "TimeSpeed":
-                        ts = t
-                        break
-
-            if abs(speed - 1.0) < 1e-5 and not reverse:
-                if ts:
-                    media_out.ConnectInput("Input", media_in)
-                    ts.Delete()
-                tool_name = None
-            else:
-                if not ts:
-                    ts = comp.AddTool("TimeSpeed")
-                    if not ts:
-                        raise OperationError("Could not create TimeSpeed tool in Fusion composition.")
-                    # Wire non-destructively: connect ts between current media_out input source and media_out
-                    current_out_src = None
-                    try:
-                        out_inp = media_out.GetInput("Input")
-                        if out_inp:
-                            conn = out_inp.GetConnectedOutput()
-                            if conn:
-                                current_out_src = conn.GetTool()
-                    except Exception:
-                        pass
-                    if current_out_src and current_out_src != ts:
-                        ts.ConnectInput("Input", current_out_src)
-                    else:
-                        ts.ConnectInput("Input", media_in)
-                    media_out.ConnectInput("Input", ts)
-                else:
-                    # ts already exists, ensure it's connected
-                    ts_in = None
-                    try:
-                        inp = ts.GetInput("Input")
-                        if inp and inp.GetConnectedOutput():
-                            ts_in = inp.GetConnectedOutput().GetTool()
-                    except Exception:
-                        pass
-                    if not ts_in:
-                        ts.ConnectInput("Input", media_in)
-                    media_out.ConnectInput("Input", ts)
-
-                effective_speed = -speed if reverse else speed
-                ts.SetInput("Speed", float(effective_speed))
-
-                interpolate = bool(params.get("interpolate_frames", True))
-                try:
-                    ts.SetInput("InterpolateBetweenFrames", 1.0 if interpolate else 0.0)
-                except Exception:
-                    pass
-                tool_name = getattr(ts, "Name", "TimeSpeed1")
+            tools = comp.GetToolList(False) or {}
+            values = list(tools.values()) if isinstance(tools, dict) else list(tools)
+            owned = [tool for tool in values if call(tool, "GetData", None, "ResolveAIBridgeOwner") == owner]
+            if len(owned) > 1:
+                raise OperationError("Multiple bridge speed nodes found. Inspect Fusion before changing speed.")
+            node = owned[0] if owned else None
+            if node is None and abs(speed - 1) < 1e-9:
+                return {"item_id": info["id"], "speed": 1.0, "changed": False,
+                        "note": "No bridge-owned speed node to reset. Existing user/legacy TimeSpeed nodes were preserved."}
+            if node is None:
+                media_out = comp.FindTool("MediaOut1")
+                if not media_out:
+                    raise OperationError("Cannot locate MediaOut1; inspect Fusion before changing speed.")
+                output_input = media_out.FindMainInput(1)
+                previous_output = output_input.GetConnectedOutput() if output_input else None
+                if not previous_output:
+                    raise OperationError("MediaOut has no connected source; nothing was changed.")
+                node = comp.AddTool("TimeSpeed")
+                if not node:
+                    raise OperationError("Resolve could not create the Free-compatible TimeSpeed node.")
+                created = True
+                node.SetAttrs({"TOOLS_Name": "ResolveAIBridgeTimeSpeed"})
+                node.SetData("ResolveAIBridgeOwner", owner)
+                if call(node, "GetData", None, "ResolveAIBridgeOwner") != owner:
+                    raise OperationError("Could not mark the bridge-owned speed node.")
+                if not node.FindMainInput(1).ConnectTo(previous_output):
+                    raise OperationError("Could not connect the speed node to the existing Fusion chain.")
+            # Neutral speed leaves every pre-existing connection intact.
+            node.SetInput("Speed", speed)
+            actual = call(node, "GetInput", None, "Speed")
+            if actual is None or not math.isfinite(float(actual)) or abs(float(actual) - speed) > 1e-6:
+                raise OperationError("TimeSpeed did not accept the requested speed; inspect Fusion.")
+            interpolate = bool(params.get("interpolate_frames", True))
+            interpolation_set = bool(call(node, "SetInput", False, "InterpolateBetweenFrames", 1.0 if interpolate else 0.0))
+            if created and not output_input.ConnectTo(node.FindMainOutput(1)):
+                raise OperationError("Could not connect the speed node to MediaOut.")
+        except Exception:
+            if created and node:
+                if output_input and previous_output:
+                    output_input.ConnectTo(previous_output)
+                node.Delete()
+            raise
         finally:
             comp.Unlock()
-
-        slow_down = round((1.0 - speed) * 100.0, 1) if speed < 1.0 else 0.0
-        speed_up = round((speed - 1.0) * 100.0, 1) if speed > 1.0 else 0.0
-
-        return {
-            "item_id": info["id"],
-            "name": info.get("name"),
-            "method": "fusion_timespeed",
-            "speed": speed,
-            "speed_percent": round(speed * 100.0, 1),
-            "slow_down_percent": slow_down,
-            "speed_up_percent": speed_up,
-            "reverse": reverse,
-            "tool": tool_name,
-            "interpolate_frames": bool(params.get("interpolate_frames", True)),
-        }
+        return {"item_id": info["id"], "name": info.get("name"), "method": "fusion_timespeed", "speed": speed,
+                "speed_percent": speed * 100, "reverse": False, "tool": getattr(node, "Name", "ResolveAIBridgeTimeSpeed"),
+                "interpolate_frames": interpolate, "interpolation_set": interpolation_set,
+                "note": "Video-only constant speed. Timeline duration and linked audio are unchanged. Existing Fusion connections are preserved; 1x neutralizes only the bridge-owned node."}
 
     def _op_create_compound_clip(self, params):
         timeline = self._timeline()
@@ -2955,11 +2749,296 @@ class ResolveOperations:
             "source_items": [info["id"] for _, info in targets],
         }
 
+    def _timeline_snapshot(self, timeline):
+        """Read comparable structure without changing the active timeline."""
+        tracks = []
+        for kind in ("video", "audio", "subtitle"):
+            for index in range(1, int(call(timeline, "GetTrackCount", 0, kind) or 0) + 1):
+                clips = []
+                for position, item in enumerate(call(timeline, "GetItemListInTrack", [], kind, index) or [], 1):
+                    info = self._item_summary(item, kind, index, position)
+                    # Copies have new UUIDs, but identical source ranges and properties.
+                    for key in ("id", "unique_id"):
+                        info.pop(key, None)
+                    info["source_start"] = call(item, "GetSourceStartFrame", None)
+                    info["source_end"] = call(item, "GetSourceEndFrame", None)
+                    info["properties"] = plain(call(item, "GetProperty", {}) or {})
+                    info["fusion_count"] = call(item, "GetFusionCompCount", 0)
+                    clips.append(info)
+                tracks.append({"type": kind, "index": index, "name": call(timeline, "GetTrackName", "", kind, index),
+                               "enabled": call(timeline, "GetIsTrackEnabled", None, kind, index),
+                               "locked": call(timeline, "GetIsTrackLocked", None, kind, index), "clips": clips})
+        return {"start": call(timeline, "GetStartFrame", None), "end": call(timeline, "GetEndFrame", None),
+                "settings": {key: call(timeline, "GetSetting", None, key) for key in ("timelineFrameRate", "timelineResolutionWidth", "timelineResolutionHeight")},
+                "tracks": tracks}
+
+    def _timeline_fingerprint(self, timeline):
+        import hashlib
+        return hashlib.sha256(json.dumps(self._timeline_snapshot(timeline), sort_keys=True).encode()).hexdigest()
+
+    @staticmethod
+    def _timeline_identity(timeline):
+        return {"id": call(timeline, "GetUniqueId", None), "name": call(timeline, "GetName", "")}
+
+    def _duplicate_current(self, name, open_duplicate=True):
+        project, original = self._project(), self._timeline()
+        before = self._timeline_snapshot(original)
+        unique_name = "%s — %s" % (str(name or (original.GetName() + " preview"))[:120], uuid.uuid4().hex[:8])
+        duplicate = call(original, "DuplicateTimeline", None, unique_name)
+        if duplicate is None or isinstance(duplicate, bool):
+            raise OperationError("Timeline duplication is unavailable on this Resolve build; no edit was attempted.")
+        try:
+            if self._timeline_snapshot(duplicate) != before:
+                raise OperationError("The duplicate did not match the original timeline structure; no edit was attempted.")
+            if self._timeline_snapshot(original) != before:
+                raise OperationError("Timeline changed while it was being copied; inspect both timelines before editing.")
+            target = duplicate if open_duplicate else original
+            if not project.SetCurrentTimeline(target):
+                raise OperationError("Could not open the requested timeline after duplication.")
+        except Exception:
+            project.SetCurrentTimeline(original)
+            raise
+        return duplicate, self._timeline_identity(duplicate)
+
+    def _op_preview_timeline(self, params):
+        original = self._timeline_identity(self._timeline())
+        _, preview = self._duplicate_current(params.get("name"), open_duplicate=True)
+        return {"original": original, "preview": preview, "active": "preview",
+                "note": "Original retained. Call timeline_overview for NEW clip IDs, apply edits to the preview, then compare_timelines. No edits have been applied yet."}
+
+    def _find_timeline(self, identifier):
+        matches = []
+        project = self._project()
+        for index in range(1, int(project.GetTimelineCount() or 0) + 1):
+            item = project.GetTimelineByIndex(index)
+            if str(identifier) in (str(call(item, "GetUniqueId", None)), str(call(item, "GetName", ""))):
+                matches.append(item)
+        if len(matches) != 1:
+            raise OperationError("Timeline identifier is missing or ambiguous. Use a unique ID from list_timelines.")
+        return matches[0]
+
+    def _op_compare_timelines(self, params):
+        original = self._find_timeline(params.get("original"))
+        preview = self._find_timeline(params.get("preview"))
+        before, after = self._timeline_snapshot(original), self._timeline_snapshot(preview)
+        changes = []
+        for key in ("start", "end", "settings"):
+            if before[key] != after[key]:
+                changes.append({"field": key, "before": before[key], "after": after[key]})
+        old = {(track["type"], track["index"]): track for track in before["tracks"]}
+        new = {(track["type"], track["index"]): track for track in after["tracks"]}
+        for key in sorted(old.keys() | new.keys()):
+            if old.get(key) != new.get(key):
+                changes.append({"track": "%s%d" % key, "before": old.get(key), "after": new.get(key)})
+        before_markers = plain(call(original, "GetMarkers", {}) or {})
+        after_markers = plain(call(preview, "GetMarkers", {}) or {})
+        if before_markers != after_markers:
+            changes.append({"field": "markers", "before": before_markers, "after": after_markers})
+        return {"original": self._timeline_identity(original), "preview": self._timeline_identity(preview),
+                "structurally_equal": not changes, "changes": changes,
+                "limitations": "Compares tracks, ranges, source references, readable clip properties, Fusion counts and markers. Does not compare rendered pixels, internal Fusion graphs, full color grades or Fairlight processing."}
+
+    def _op_project_health(self, params):
+        timeline, project = self._timeline(), self._project()
+        findings = []
+        start, end = float(timeline.GetStartFrame()), float(timeline.GetEndFrame())
+        for track in self._timeline_snapshot(timeline)["tracks"]:
+            label = "%s%d" % (track["type"], track["index"])
+            if track["enabled"] is False:
+                findings.append({"type": "disabled_track", "track": label, "severity": "info"})
+            if track["locked"]:
+                findings.append({"type": "locked_track", "track": label, "severity": "info"})
+            cursor = start
+            for clip in sorted(track["clips"], key=lambda clip: clip["start"]):
+                if clip["enabled"] is False:
+                    findings.append({"type": "disabled_clip", "clip": clip["label"], "severity": "info"})
+                if clip["start"] > cursor:
+                    findings.append({"type": "gap", "track": label, "start_frame": cursor, "end_frame": clip["start"], "severity": "info"})
+                cursor = max(cursor, clip["end"])
+            if track["clips"] and cursor < end:
+                findings.append({"type": "gap", "track": label, "start_frame": cursor, "end_frame": end, "severity": "info"})
+        seen = set()
+        for item, info in self._timeline_items():
+            media = call(item, "GetMediaPoolItem", None)
+            path = call(media, "GetClipProperty", "", "File Path")
+            if path and not Path(path).exists() and path not in seen:
+                findings.append({"type": "missing_source", "item_id": info["id"], "path": path, "severity": "warning"})
+                seen.add(path)
+        expected_fps = params.get("expected_frame_rate")
+        expected_width, expected_height = params.get("expected_width"), params.get("expected_height")
+        width, height = self._project_resolution()
+        for field, actual, expected in (("frame_rate", self._project_rate(), expected_fps), ("width", width, expected_width), ("height", height, expected_height)):
+            if expected is not None and abs(float(actual) - float(expected)) > 0.01:
+                findings.append({"type": "delivery_mismatch", "field": field, "actual": actual, "expected": expected, "severity": "warning"})
+        return {"project": project.GetName(), "timeline": self._timeline_identity(timeline), "findings": findings,
+                "warning_count": sum(f["severity"] == "warning" for f in findings),
+                "scope": "Active timeline. Gaps/disabled tracks can be intentional. Missing-file checks may flag image-sequence patterns. Delivery settings are compared only with the expectations you supply; this does not inspect Fairlight mute automation or queued render settings."}
+
+    def _op_bridge_capabilities(self, _params):
+        import shutil
+        instance = self.resolve
+        project = call(call(instance, "GetProjectManager", None), "GetCurrentProject", None)
+        timeline = call(project, "GetCurrentTimeline", None)
+        return {"bridge_version": AGENT_VERSION, "resolve_version": call(instance, "GetVersionString", None),
+                "product": call(instance, "GetProductName", None), "transport": self.transport,
+                "timeline_open": timeline is not None,
+                "api_present": {method: callable(getattr(timeline, method, None)) if timeline is not None else None for method in ("DuplicateTimeline", "GetMarkers", "AddMarker", "DeleteClips", "GetUniqueId")},
+                "source_frame_decoder": self._ffmpeg_path() is not None,
+                "source_audio_decoder": bool(self._ffmpeg_path() or shutil.which("afconvert")),
+                "free_workflow": "Start the Console worker inside Resolve Free. These review tools use regular timeline/marker APIs and external source decoding; no Studio AI features are used.",
+                "limitations": ["API presence is not proof a call will succeed on this build; each operation checks its result.",
+                                "Composite frame export is attempted at capture time; source fallback needs ffmpeg and excludes timeline effects.",
+                                "Audio analysis reads source PCM, not the processed timeline mix.",
+                                "Dialogue cut application supports an isolated clip or one aligned video/audio pair; complex timelines receive markers for manual review."]}
+
+    def _op_review_silence(self, params):
+        timeline = self._timeline()
+        fingerprint = self._timeline_fingerprint(timeline)
+        analysis_params = dict(params, action="silence_cuts", whole_clip=True)
+        analysis = self._op_timeline_audio(analysis_params)
+        if self._timeline_fingerprint(timeline) != fingerprint:
+            raise OperationError("Timeline changed during analysis; no markers were added. Inspect the timeline and retry.")
+        existing = call(timeline, "GetMarkers", {}) or {}
+        markers, skipped = [], []
+        timeline_start = float(timeline.GetStartFrame())
+        for cut in analysis["cuts"]:
+            start, end = cut["timeline_start_frame"], cut["timeline_end_frame"]
+            marker_frame = start - timeline_start
+            if end <= start or marker_frame in existing or str(marker_frame) in existing:
+                skipped.append(cut)
+                continue
+            marker_id = uuid.uuid4().hex
+            data = {"bridge": "silence-review-v1", "id": marker_id, "timeline_id": call(timeline, "GetUniqueId", None),
+                    "fingerprint": fingerprint, "item_id": analysis["item_id"], "start": start, "end": end}
+            ok = timeline.AddMarker(marker_frame, "Yellow", "Review silence", "Source audio appears silent; review before cutting.", end - start, json.dumps(data))
+            if ok:
+                markers.append(dict(cut, marker_id=marker_id, marker_frame=marker_frame))
+            else:
+                skipped.append(cut)
+        return {"item_id": analysis["item_id"], "timeline": self._timeline_identity(timeline), "markers": markers,
+                "skipped": skipped, "analysis_truncated": analysis["truncated"],
+                "note": "Markers only; no clips removed. Audition candidates, then pass selected marker_ids to apply_silence_cuts. Selection applies on a new duplicate timeline."}
+
+    def _op_apply_silence_cuts(self, params):
+        """Apply reviewed ranges only to a dedicated dialogue clip or aligned AV pair."""
+        timeline = self._timeline()
+        wanted = params.get("marker_ids") or []
+        if not wanted or len(wanted) != len(set(wanted)):
+            raise OperationError("Provide a nonempty list of distinct reviewed marker_ids.")
+        fingerprint = self._timeline_fingerprint(timeline)
+        reviews = {}
+        for marker in (call(timeline, "GetMarkers", {}) or {}).values():
+            try:
+                data = json.loads(marker.get("customData", ""))
+            except (ValueError, TypeError):
+                continue
+            if isinstance(data, dict) and data.get("bridge") == "silence-review-v1":
+                reviews[data.get("id")] = data
+        selected = []
+        for key in wanted:
+            data = reviews.get(key)
+            if not data or data.get("timeline_id") != call(timeline, "GetUniqueId", None) or data.get("fingerprint") != fingerprint:
+                raise OperationError("A review marker is missing or stale. Run review_silence again after timeline edits.")
+            selected.append(data)
+        if len({data["item_id"] for data in selected}) != 1:
+            raise OperationError("Select review markers from one dialogue clip at a time.")
+        targets = self._timeline_items()
+        # Whole-timeline ripple across arbitrary clips is deliberately not guessed.
+        if not 1 <= len(targets) <= 2 or any(info["track_type"] not in ("audio", "video") for _, info in targets):
+            raise OperationError("Automatic cleanup needs an isolated dialogue clip or one aligned video/audio pair. Use the review markers for manual cuts on this multi-clip timeline.")
+        starts = {info["start"] for _, info in targets}
+        ends = {info["end"] for _, info in targets}
+        if len(starts) != 1 or len(ends) != 1 or (len(targets) == 2 and {info["track_type"] for _, info in targets} != {"audio", "video"}):
+            raise OperationError("The video/audio pair must have identical timeline boundaries.")
+        start, end = float(next(iter(starts))), float(next(iter(ends)))
+        if not start.is_integer() or not end.is_integer():
+            raise OperationError("Subframe clip boundaries cannot be rebuilt by this workflow.")
+        start, end = int(start), int(end)
+        ranges = sorted((int(data["start"]), int(data["end"])) for data in selected)
+        if any(a < start or b > end or a >= b for a, b in ranges) or any(ranges[i][0] < ranges[i-1][1] for i in range(1, len(ranges))):
+            raise OperationError("Selected silence ranges are invalid or overlap.")
+        kept, cursor = [], start
+        for begin, finish in ranges:
+            if begin > cursor:
+                kept.append((cursor, begin))
+            cursor = finish
+        if cursor < end:
+            kept.append((cursor, end))
+        if not kept:
+            raise OperationError("These cuts would remove the entire dialogue clip. Nothing was changed.")
+        originals = []
+        for item, info in targets:
+            if call(item, "GetFusionCompCount", 0) or call(timeline, "GetIsTrackLocked", False, info["track_type"], info["track_index"]):
+                raise OperationError("Unlock tracks and use dialogue clips without Fusion compositions for automatic cleanup.")
+            self._source_window(item, start)
+            media = call(item, "GetMediaPoolItem", None)
+            source = call(item, "GetSourceStartFrame", None)
+            raw_fps = call(media, "GetClipProperty", None, "FPS")
+            if media is None or source is None or (raw_fps and abs(float(raw_fps) - self._project_rate()) > 0.01):
+                raise OperationError("Cannot safely rebuild this source range or mixed frame rate.")
+            originals.append((item, info, media, int(source), self._read_transform(item)))
+        original_identity = self._timeline_identity(timeline)
+        preview, preview_identity = self._duplicate_current(params.get("name") or "Dialogue cleanup", open_duplicate=True)
+        try:
+            copied = [item for item, _ in self._timeline_items()]
+            if not preview.DeleteClips(copied, False):
+                raise OperationError("Resolve refused to replace the copied dialogue clips.")
+            batches = []
+            record = start
+            for begin, finish in kept:
+                segment_items = []
+                for original, info, media, source, transform in originals:
+                    request = {"mediaPoolItem": media, "startFrame": source + begin - start,
+                               "endFrame": source + finish - start - 1, "recordFrame": record,
+                               "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2}
+                    created = self._media_pool().AppendToTimeline([request]) or []
+                    if len(created) != 1 or call(created[0], "GetStart", None) != record or call(created[0], "GetEnd", None) != record + finish - begin:
+                        raise OperationError("Resolve returned an incorrect rebuilt dialogue segment.")
+                    piece = created[0]
+                    _, rejected = self._apply_transform(piece, transform_params_from_props(transform))
+                    if rejected:
+                        raise OperationError("Could not restore the dialogue transform.")
+                    if info.get("enabled") is not None and not call(piece, "SetClipEnabled", False, info["enabled"]):
+                        raise OperationError("Could not restore enabled state.")
+                    if info.get("color") and not call(piece, "SetClipColor", False, info["color"]):
+                        raise OperationError("Could not restore clip color.")
+                    if info["track_type"] == "video" and not call(original, "CopyGrades", False, [piece]):
+                        raise OperationError("Could not copy the current grade layer.")
+                    segment_items.append(piece)
+                if len(segment_items) == 2 and not preview.SetClipsLinked(segment_items, True):
+                    raise OperationError("Could not link the rebuilt video/audio segment.")
+                batches.append({"start": record, "end": record + finish - begin, "item_ids": [call(piece, "GetUniqueId", None) for piece in segment_items]})
+                record += finish - begin
+            # Markers refer to the original timing. Clear only bridge review markers on the copy;
+            # other markers remain, explicitly reported below rather than silently re-timed.
+            for offset, marker in (call(preview, "GetMarkers", {}) or {}).items():
+                try:
+                    data = json.loads(marker.get("customData", ""))
+                    if isinstance(data, dict) and data.get("bridge") == "silence-review-v1":
+                        if not preview.DeleteMarkerAtFrame(offset):
+                            raise OperationError("Could not remove stale review markers on the preview.")
+                except (ValueError, TypeError):
+                    pass
+        except Exception as exc:
+            reopened = bool(self._project().SetCurrentTimeline(timeline))
+            raise OperationError("Dialogue cleanup failed: %s. Original '%s' is intact%s. Partial preview '%s' retained for inspection."
+                                 % (exc, original_identity["name"], " and reopened" if reopened else "; open it manually", preview_identity["name"]))
+        return {"original": original_identity, "preview": preview_identity, "removed_frames": sum(b-a for a, b in ranges),
+                "segments": batches, "selected_marker_ids": wanted,
+                "note": "Original retained. Only selected intervals removed, with remaining segments closed up. Current grade layer and static transforms copied. Review fades, audio gain, other grade layers, clip metadata and any non-review markers before accepting the preview."}
+
+
     # ------------------------------------------------------------- dispatch
 
     def handlers(self):
         return {
             "status": self._op_status,
+            "preview_timeline": self._op_preview_timeline,
+            "compare_timelines": self._op_compare_timelines,
+            "project_health": self._op_project_health,
+            "bridge_capabilities": self._op_bridge_capabilities,
+            "review_silence": self._op_review_silence,
+            "apply_silence_cuts": self._op_apply_silence_cuts,
             "project_info": self._op_project_info,
             "list_timelines": self._op_list_timelines,
             "open_timeline": self._op_open_timeline,

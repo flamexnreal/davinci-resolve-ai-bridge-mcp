@@ -1,5 +1,54 @@
 # Release Notes
 
+
+## v1.10.0 — Free-compatible review workflows and reliability (2026-09-06)
+
+This release improves reliability for DaVinci Resolve Free's Console-worker workflow and adds ways to inspect and review edits while retaining the original timeline.
+
+### Added
+
+- `preview_timeline` and `compare_timelines`: keep the original, edit a duplicate and review structural/property/marker differences.
+- `project_health`: active-timeline missing source, gap, disabled/locked track/clip checks and optional delivery expectations.
+- `bridge_capabilities`: Resolve version, transport, ordinary API presence and source decoder availability, including when no timeline is open.
+- `review_silence`: candidate source-audio silence markers, with stale-review detection.
+- `apply_silence_cuts`: apply explicitly accepted marker intervals to a duplicate of an isolated dialogue clip or one aligned video/audio pair. Complex timelines remain manual.
+- Optional `--with-ffmpeg` private source decoder, Windows-aware Python discovery and explicit npm `--serve` mode.
+- Regression tests, real-decoder checks, native MCP image/schema tests, cross-platform CI and real npm tarball validation.
+
+### Fixed
+
+- npm package includes the requirements.txt file used by installation.
+- Malformed client JSON is preserved; valid merges receive timestamped backups and atomic writes.
+- Playhead targeting uses exclusive end boundaries and ignores disabled clips/tracks.
+- Source frame capture uses absolute timeline positions, including timelines starting at 01:00:00:00.
+- Timeline-specific rates/resolution and drop-frame timecode conversion are respected.
+- Stereo peak/clipping analysis no longer averages opposite-polarity channels into silence.
+- Trailing/all-silent intervals are closed correctly; analysis returns explicit source/timeline coordinates and truncation.
+- export_slice returns the trimmed WAV rather than the full decoded source.
+- Failed clip rebuilds retain a checkpoint and report partial failure instead of claiming an unverified rollback.
+- Speed 1 neutralizes a bridge-owned TimeSpeed node without bypassing existing Fusion connections.
+
+### Changed / upgrade notes
+
+- `timeline_overview.id` prefers the Resolve unique ID; `label` retains V1.2-style positional references. Old labels remain accepted, but duplicates/rebuilt clips have new IDs.
+- `timeline_frame` returns native MCP image content plus text metadata. Its frame argument is now an absolute timeline frame, consistent with editing tools.
+- Source-only images/audio are labeled accurately; no claim of rendered viewer or Fairlight mix equivalence.
+- Splits reject Fusion clips, locked tracks, mixed source rates and known retiming. They preserve static transforms, clip state/color and the current grade layer; advanced metadata, links and fades still require review.
+- Fusion speed changes leave timeline duration and linked audio unchanged. Untagged legacy/user TimeSpeed nodes are preserved; they require manual reset. Reverse source mapping is unverified and rejected. Clip-FPS mode multiplies current source FPS and affects every use of the media.
+- Removed unused duplicate audio/image helper modules. Website libraries are development dependencies and the built website is excluded from the npm CLI package.
+- Installer version derives from the bridge version. README, agent instructions, recipes, troubleshooting and release/testing guidance describe current behavior.
+
+### Validation and Free-version scope
+
+- 42 automated tests passed locally, including synthetic audio, mocked Resolve operations, actual FFmpeg source decoding and MCP image conversion.
+- Website build, real npm package-content validation and Python source checks passed.
+- A live MCP handshake advertised 44 tools. Read-only resolve_status and bridge_capabilities succeeded through the Console worker on **DaVinci Resolve Free 21.0.3.7 (macOS)**.
+- Doctor: zero failures; external direct attach was unavailable and the intended Console route answered successfully.
+- No live timeline edits were performed. Use docs/TESTING.md for manual Free-version edit checks before claiming those were verified. New workflows use ordinary timeline/marker/Fusion functionality, not Studio AI calls.
+
+Earlier release sections below are historical; current restrictions and setup are documented above and in README.md.
+
+
 ## v1.9.0 — Compound Clips and Clip Speed Changes
 
 This release introduces two major timeline editing capabilities for DaVinci Resolve (Free and Studio):

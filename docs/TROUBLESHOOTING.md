@@ -8,7 +8,7 @@ In this order:
 
 1. Open DaVinci Resolve with a project.
 2. Run doctor and read the **Direct attach to Resolve** line.
-3. If it says the library loads but Resolve did not answer, check **Preferences > System > General > External scripting using**. It must not be **None**. **Local** is the normal setting.
+3. If it says the library loads but Resolve did not answer, check **Preferences > System > General > External scripting using**. For external scripting, **Local** is the normal setting. Resolve Free users can use the Console worker without enabling external access.
 4. If direct attach is unavailable on your build, use **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
 5. If that menu is missing, run the installer again and restart Resolve once. Resolve only scans for new menu scripts while it starts up.
 6. As a last resort, paste the line in `~/.resolve-ai-bridge/console-command.txt` into **Workspace > Console** with the **Py3** tab selected.
@@ -90,7 +90,7 @@ If Resolve shortens the still anyway, raise **Preferences > Editing > Standard s
 
 ## An Image Is Not Visible
 
-It is probably underneath your footage. Put overlays on `track_index` 2 or higher, then confirm with `timeline_overview` that the item id is `V2.x` and that the clip is enabled.
+It is probably underneath your footage. Put overlays on `track_index` 2 or higher, then confirm with `timeline_overview` that the item label is `V2.x` and that the clip is enabled.
 
 ## insert_title Reports text_set false
 
@@ -117,3 +117,23 @@ Set the same variable in your MCP entry's `env` block to pin one route permanent
 2. Close and reopen the terminal.
 3. Confirm `node --version` and `npm --version` work.
 4. Run Remotion commands from the Remotion project folder, not the Resolve Console.
+
+## New tools are missing after an update
+
+Reinstall from the updated checkout, then restart/refresh the MCP server in your AI client. The running Console worker reloads operations per request, but clients cache tool schemas. `resolve_status` can work without a timeline; timeline tools require one.
+
+## Free frame capture needs a decoder
+
+Install the optional private binary with `python3 install.py --with-ffmpeg`, or provide ffmpeg on PATH. A custom absolute binary path can be provided through RESOLVE_AI_BRIDGE_FFMPEG. Source fallback cannot show timeline effects; use the actual Resolve viewer to verify those when composite export is unavailable.
+
+## Split or cleanup refuses a clip
+
+Reconstruction is restricted where source timing or effect preservation is uncertain. Use Resolve's manual razor for Fusion clips, retimed/mixed-rate material, or complex linked edits. Checkpoint/preview names are returned for recovery. Never delete the original/checkpoint before reviewing the result.
+
+## Speed reset does not remove an older TimeSpeed node
+
+The updated bridge only resets nodes tagged as its own. User-made and older untagged TimeSpeed nodes are preserved because their ownership cannot be determined safely. Inspect/remove the old node manually if appropriate. Reverse mapping is not verified and is refused.
+
+## Existing client configuration was not updated
+
+Malformed JSON or an unexpected structure is preserved rather than overwritten. Fix the existing configuration, then rerun setup. Successful merges create a timestamped .backup file next to the original.

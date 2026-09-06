@@ -20,8 +20,8 @@ at the playhead, scaled to 40 percent and tucked into the
 bottom right corner. Then show me the timeline to confirm it.`;
 
 const editingPrompt = `Take the clip under the playhead. Push it in from 100 to 130
-percent over its first two seconds, then split it where the
-playhead is. Show me the timeline before and after each step.`;
+percent over its first two seconds on a preview timeline.
+Show me the timeline before and after each step.`;
 
 const remotionCommands = `# Install the official Remotion skill for your coding agents
 npx -y skills@latest add remotion-dev/skills -g -y
@@ -91,11 +91,11 @@ const faq = [
   },
   {
     q: "Do I have to redo a step every time I open Resolve?",
-    a: "Normally no. The MCP server attaches to the running Resolve by itself. If your build refuses that, the Workspace > Scripts launcher is one click per Resolve session and stays in the menu permanently after a single Resolve restart.",
+    a: "In Resolve Free, start the Console worker once per session: run the menu launcher, select Py3, paste the copied command and press Enter. Direct attach can avoid this step when external scripting is available.",
   },
   {
     q: "Does this work on free DaVinci Resolve?",
-    a: "Yes. Blackmagic's scripting documentation states the scripting APIs are a common superset for the free and Studio versions, and the Console worker runs inside Resolve either way. No tool here depends on a Studio-only or AI feature.",
+    a: "Yes, the Free workflow runs inside Resolve's Console. Review tools use ordinary timeline APIs, not Studio AI features. Individual operations still depend on your Resolve build; source capture excludes timeline effects and needs FFmpeg.",
   },
   {
     q: "Why did my image only last one frame?",

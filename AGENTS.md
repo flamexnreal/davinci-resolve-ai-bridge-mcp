@@ -27,3 +27,15 @@ Read `README.md` and `skills/resolve-ai-editing/SKILL.md` before changing the Py
 - Do not add tools for API calls that are Studio-only or that cannot be verified.
 
 Run the doctor check after changes. Keep README.md and documentation in agreement.
+
+## Review and regression rules
+
+- Use unique clip IDs as primary identifiers; short labels are positional.
+- Frame inputs are absolute timeline positions. Keep marker-relative offsets and source positions explicit, and retain drop-frame tests.
+- New workflows must use Free-compatible ordinary APIs; verify returned results and document manual integration limits.
+- Preserve the original/checkpoint before destructive reconstruction. Report partial failures honestly.
+- Modify only bridge-owned speed nodes; never bypass a user's Fusion chain during reset.
+- Treat source images/audio as source-only, not a composited viewer or Fairlight mix.
+- Do not overwrite malformed client configs. Back up valid configs before atomic merges.
+- Run `python3 -m unittest discover -s tests -v` and `node tools/check-package.mjs` for relevant changes, plus the doctor after installation.
+- Follow docs/RELEASING.md when publishing is explicitly requested. Do not choose a release tag/version on behalf of a maintainer who is handling that separately.

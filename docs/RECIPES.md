@@ -35,7 +35,7 @@ Inspect the timeline. Take the clip under the playhead and animate its zoom from
 ## Cut A Clip At The Playhead
 
 ```text
-Inspect the timeline. Split the clip under the playhead at the current playhead frame with split_clip. Then inspect again and show me the two resulting item ids, their start and end frames, and remind me that any grade on the original was not copied to the halves.
+Inspect the timeline. Split the clip under the playhead at the current playhead frame with split_clip. Then inspect again and show me the two resulting item ids, their start and end frames, and report the retained checkpoint. Explain which clip data was preserved and which needs manual review.
 ```
 
 ## Import a Rendered Motion Graphic
@@ -73,4 +73,22 @@ May change: clip order, disabled takes, markers, clip colors, overlay graphics
 Do not: delete source clips or start a render
 
 First inspect the timeline. Summarize the existing story, propose an edit plan, and list anything the current MCP tools cannot perform reliably. Wait for approval before editing.
+```
+
+## Preview an edit
+
+```text
+Inspect my timeline, create a preview_timeline copy, and get fresh clip IDs. Apply the changes on that copy. Compare it with the original and tell me what changed, without deleting either timeline.
+```
+
+## Review dialogue pauses
+
+```text
+Inspect the timeline and call review_silence on my dialogue clip. Place review markers only. I will audition them and tell you which marker IDs to remove. Do not apply cuts yet.
+```
+
+## Project health
+
+```text
+Inspect the active timeline and run project_health for a 1920 by 1080, 24 fps delivery. Report missing sources and mismatches. List gaps and disabled tracks as items to review, not automatic mistakes.
 ```
