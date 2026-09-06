@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Diagnose the installed bridge without importing Resolve from this process."""
 
+import argparse
 import json
 import os
 import subprocess
@@ -131,6 +132,9 @@ def check_direct_attach():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--offline", action="store_true", help="Check files only; never attach or queue Resolve calls")
+    args = parser.parse_args()
     print("\nResolve AI Bridge doctor")
     print("Runtime: %s\n" % HOME)
 
@@ -185,7 +189,7 @@ def main():
         config_detail = str(exc)
     result(config_ok, "MCP configuration", config_detail)
 
-    direct = check_direct_attach() or {}
+    direct = {} if args.offline else (check_direct_attach() or {})
 
     heartbeat_path = HOME / "agent.json"
     heartbeat = None
@@ -208,7 +212,9 @@ def main():
     # This is a live state, never an installation problem, so it stays a warning.
     result(console_online, "Console worker", detail, warning=True)
 
-    if direct.get("ok") or console_online:
+    if args.offline:
+        result(True, "Round trip to Resolve", "skipped by --offline; no native or queue calls")
+    elif direct.get("ok") or console_online:
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
         try:

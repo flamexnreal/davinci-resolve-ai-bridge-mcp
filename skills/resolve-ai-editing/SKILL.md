@@ -87,7 +87,8 @@ The public Resolve scripting API does not expose every action from the Edit page
 ## Failure Behavior
 
 - If `resolve_status` reports no connection, stop and give the start instructions above.
-- If a tool returns an error, do not repeat it unchanged more than once.
+- On timeout or unknown outcome, never replay a mutation automatically. Inspect its request record and fresh timeline state first. Client timeout does not confirm cancellation.
+- After a stale project/timeline rejection, inspect the intended context again before submitting a new edit.
 - Read the error, inspect current state, and adjust the plan.
 - Never report success based only on an attempted call.
 

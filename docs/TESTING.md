@@ -31,3 +31,9 @@ Use a disposable project/timeline with short media. Start the Console worker, th
 10. Supply delivery dimensions to `project_health`; verify mismatch findings. Treat track gaps and disabled clips as informational until reviewed.
 
 Record Resolve version, edition, OS, decoder, result, and limitations in the release notes. A passing mock test is not a claim of live Free-version validation.
+
+## Reliability regressions
+
+`tests/test_reliability.py` uses mocks and temporary runtime directories: no native Resolve imports or live project edits. It covers uncertain direct dispatch, safe pre-dispatch fallback, deadline rejection, context changes, concurrent clients, duplicate records, busy heartbeat/client timeout and installer failure/interruption. Run the full unittest suite and npm package/build checks. Doctor `--offline` checks installation without contacting Resolve.
+
+Manual Free verification remains required on a disposable project: run a job longer than 25 seconds, observe busy heartbeats and eventual completion after client timeout, queue edits from two clients then switch timelines/projects, confirm stale work is rejected, and restart after an interrupted job to inspect its durable record. Do not use a production project for these checks. Also validate update/recovery on macOS, Windows and Linux. Native calls holding the GIL, UI changes during execution and power-loss filesystem durability are outside mock guarantees.

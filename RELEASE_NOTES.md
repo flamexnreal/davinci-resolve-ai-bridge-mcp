@@ -1,5 +1,23 @@
 # Release Notes
 
+## v1.11.0 — Concurrency protection, guarded edits and crash-proof updates (2026-09-06)
+
+This release hardens the bridge against accidental duplicate edits, prevents tasks from targeting the wrong timeline, eliminates false timeouts during long operations, and makes installations crash-proof with automatic rollback.
+
+### Added
+- **Multi-Timeline Context Protection**: Queued edits are bound to the client's observed project and timeline IDs, preventing accidental edits if you switch timelines in Resolve while a request is pending.
+- **Durable Request Journals**: Added request records in `~/.resolve-ai-bridge/requests/` to detect and suppress duplicate commands.
+- **Dedicated Liveness Heartbeat**: Heartbeat reporting runs on a dedicated thread without touching Resolve APIs, keeping the worker alive during heavy jobs without false 25-second timeouts.
+- **Safe Staged Installation (`install.py`)**: Validates new bridge files in a staging area before activating them, while preserving previous working installations at `~/.resolve-ai-bridge.previous` for automatic rollback.
+- **Offline Doctor Check**: Added `python3 tools/doctor.py --offline` to verify file health without requiring Resolve to be open.
+- **Cross-Platform CI**: Added GitHub Actions workflow to run regression tests and package checks across Ubuntu, macOS, and Windows.
+- **Reliability Test Suite**: Added 11 new tests covering connection drops, context switching, long-running jobs, and interrupted installs (53 tests total).
+
+### Fixed
+- **No Accidental Duplicate Replays**: Stopped blind fallback to the Console queue after an uncertain direct dispatch failure. If a connection drops mid-flight, it reports an unknown outcome rather than re-cutting or duplicating media.
+- **Request Expiration Deadlines**: Stale queued requests now expire rather than executing unexpectedly minutes later.
+- **Clear Timeout vs. Cancellation**: Clarified that client timeouts do not cancel native operations already executing inside Resolve.
+
 
 ## v1.10.0 — Free-compatible review workflows and reliability (2026-09-06)
 

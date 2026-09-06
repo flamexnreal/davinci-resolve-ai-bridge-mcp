@@ -174,3 +174,15 @@ The package check creates and inspects a temporary npm tarball; it does not publ
 [Editing recipes](docs/RECIPES.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Release notes](RELEASE_NOTES.md)
 
 MIT license. See [LICENSE](LICENSE).
+
+## Request and update reliability
+
+Console requests carry a unique ID, deadline, worker session and the project/timeline IDs last observed by that MCP client. Inspect `resolve_status` or `timeline_overview` in each client before its first queued edit. Mutations validate that context immediately before execution; stale or unavailable IDs are rejected. Restart the Console worker after updating: older workers are refused by the new client. Only one Console worker should use a runtime directory.
+
+The heartbeat reports `busy`, `state` (`running`, `completed`, `failed`, or initial `idle`) and `request_id`. Its reporting thread makes no Resolve API calls; project/timeline details are cached during jobs. A fresh heartbeat proves the Python reporter is alive, not that a native operation is making progress. A native call holding Python's GIL may still prevent heartbeat updates.
+
+A client timeout stops waiting; it **does not confirm cancellation**. Queued requests expire before execution, but active native work can finish later. Inspect `~/.resolve-ai-bridge/requests/<request-id>.json` and the timeline before attempting another edit. Completed/failed records retain results; a surviving `running` record after a crash means an unknown outcome and prevents replay of that ID. This is duplicate suppression, not an exactly-once guarantee. Records persist until manually removed with workers/clients stopped; removing them removes duplicate protection. A newly submitted request has a new ID.
+
+Direct attach falls back to Console only before dispatch. Unexpected exceptions after dispatch report an unknown outcome without replay. UI switches during native execution cannot be locked out: keep the intended project/timeline open while edits run. Context validation catches mismatches immediately before execution, not switches away and back between observations.
+
+Before updating, stop the Console worker and MCP clients. The installer builds and validates a staged runtime and dependencies before activation, retains the old directory at `~/.resolve-ai-bridge.previous`, and restores it on a caught activation failure. A hard interruption can leave a sibling `.install-lock` and `.stage-*` directory; see troubleshooting for recovery. Configuration/menu registration follows activation and is not one transaction with it. Run `python3 tools/doctor.py --offline` for file diagnostics without contacting Resolve.

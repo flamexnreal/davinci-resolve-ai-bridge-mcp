@@ -83,6 +83,9 @@ def describe():
         "console_worker": {
             "online": console is not None,
             "project": (console or {}).get("project"),
+            "state": (console or {}).get("state"),
+            "busy": (console or {}).get("busy"),
+            "request_id": (console or {}).get("request_id"),
             "heartbeat_age_seconds": (console or {}).get("heartbeat_age_seconds"),
         },
         "active": "direct" if probe.get("ok") else ("console" if console else "none"),
@@ -91,7 +94,12 @@ def describe():
 
 def call(operation, params=None, timeout=30.0):
     """Run one operation over whichever transport is available."""
-    operations = direct_operations()
+    try:
+        operations = direct_operations()
+    except Exception:  # No dispatch has started, so Console fallback is safe.
+        direct.reset()
+        _state["ops"] = None
+        operations = None
     if operations is not None:
         try:
             return operations.dispatch(operation, params or {}), "direct"
@@ -100,10 +108,10 @@ def call(operation, params=None, timeout=30.0):
         except Exception as exc:  # A broken attach should not end the session.
             direct.reset()
             _state["ops"] = None
-            if client.heartbeat() is None:
-                raise client.BridgeCallError(
-                    "Direct attach to Resolve failed (%s) and no Console worker is running." % exc
-                )
+            raise client.BridgeCallError(
+                "Direct dispatch failed (%s). Outcome unknown; the operation may have "
+                "already changed Resolve. Inspect before retrying; no Console replay was sent." % exc
+            ) from exc
 
     return client.call(operation, params or {}, timeout=timeout), "console"
 

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.10.0"
+AGENT_VERSION = "1.11.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -114,6 +114,14 @@ READABLE_TRANSFORM_KEYS = (
 )
 
 PAGES = ("media", "cut", "edit", "fusion", "color", "fairlight", "deliver")
+
+
+# Default unknown/new operations to mutations for queue context protection.
+QUEUE_READ_ONLY = frozenset({
+    "status", "project_info", "list_timelines", "timeline_overview", "list_media",
+    "get_clip_transform", "get_clip_grade", "inspect_fusion", "list_render_presets",
+    "bridge_capabilities", "project_health", "compare_timelines", "timeline_audio",
+})
 
 
 class OperationError(RuntimeError):
@@ -3088,6 +3096,18 @@ class ResolveOperations:
                 "Unknown operation '%s'. Available: %s" % (operation, ", ".join(sorted(handlers)))
             )
         return plain(handler(params or {}))
+
+    def queue_context(self):
+        project = self.resolve.GetProjectManager().GetCurrentProject()
+        timeline = project.GetCurrentTimeline() if project is not None else None
+        def identity(obj):
+            if obj is None:
+                return None
+            value = call(obj, "GetUniqueId", None)
+            if not value:
+                raise OperationError("Stable project/timeline identity unavailable; queued edits refused.")
+            return str(value)
+        return {"project_id": identity(project), "timeline_id": identity(timeline)}
 
     def heartbeat_payload(self, extra=None):
         payload = self._op_status({})

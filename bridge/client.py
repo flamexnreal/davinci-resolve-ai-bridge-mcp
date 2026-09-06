@@ -7,12 +7,17 @@ import time
 import uuid
 from pathlib import Path
 
+from bridge.operations import QUEUE_READ_ONLY
+
 
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 INBOX = HOME / "inbox"
 OUTBOX = HOME / "outbox"
 TOKEN_FILE = HOME / "token.txt"
 HEARTBEAT_FILE = HOME / "agent.json"
+# Per MCP process: bind edits to what this client last observed, not another
+# client's latest heartbeat context. Assignment replaces the snapshot atomically.
+_observed = None
 
 
 class BridgeError(RuntimeError):
@@ -111,7 +116,15 @@ def require_online():
 
 
 def call(operation, params=None, timeout=30.0):
-    require_online()
+    global _observed
+    worker = require_online()
+    if worker.get("queue_protocol") != 2:
+        raise BridgeCallError("Restart the updated Console worker before sending requests.")
+    observed = _observed
+    if operation not in QUEUE_READ_ONLY and (
+        not observed or observed.get("session") != worker.get("session")
+    ):
+        raise BridgeCallError("Inspect status or timeline_overview in this client before editing.")
     INBOX.mkdir(parents=True, exist_ok=True)
     OUTBOX.mkdir(parents=True, exist_ok=True)
     request_id = uuid.uuid4().hex
@@ -123,6 +136,9 @@ def call(operation, params=None, timeout=30.0):
         "params": params or {},
         "token": _token(),
         "sent": time.time(),
+        "deadline": time.time() + float(timeout),
+        "context": (observed or {}).get("context"),
+        "session": worker.get("session"),
     }
     _atomic_json(request_path, request)
     deadline = time.monotonic() + float(timeout)
@@ -137,6 +153,7 @@ def call(operation, params=None, timeout=30.0):
                     pass
             if not response.get("ok"):
                 raise BridgeCallError(response.get("error", "Resolve returned an unknown error."))
+            _observed = {"context": response.get("context"), "session": response.get("session")}
             return response.get("result")
         time.sleep(0.06)
     try:
@@ -144,6 +161,8 @@ def call(operation, params=None, timeout=30.0):
     except OSError:
         pass
     raise BridgeTimeout(
-        "Resolve did not answer '%s' within %.0f seconds. Check the Console and agent log."
-        % (operation, timeout)
+        "Client timed out waiting for %s (%s) after %.0f seconds. This is not confirmed "
+        "cancellation: an active native operation may still finish. Do not replay an edit; "
+        "inspect the request record in requests/ and Resolve state."
+        % (operation, request_id, timeout)
     )

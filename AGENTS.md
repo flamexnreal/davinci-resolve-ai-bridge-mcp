@@ -8,7 +8,9 @@ Read `README.md` and `skills/resolve-ai-editing/SKILL.md` before changing the Py
 - `agent/ResolveConsole.py` may depend only on the standard library, `bridge/operations.py`, and Resolve's injected objects.
 - Never import Resolve from `bridge/server.py`, `bridge/client.py`, or `tools/`. Only `bridge/direct.py` loads Resolve's native module, and only in a process that can afford to die.
 - `bridge/direct.py` must keep probing in a disposable subprocess before loading the native module in-process. A native module built for another Python can abort the process, and the MCP server has to survive that.
-- Every transport failure must fall back to the Console queue rather than raising to the client.
+- Fall back to the Console queue only before direct dispatch starts. After an unexpected dispatch failure, report an unknown outcome and never replay automatically.
+- Keep Resolve API calls on the single operation worker. Heartbeat reporting must use cached Python data. Preserve deadline, session, per-client observed context and durable request checks.
+- Stage and validate runtime/dependencies before activation; retain the previous runtime. Test installers in temporary directories, with no live client configuration changes.
 - Never write normal output to stdout from `bridge/`; stdio is reserved for MCP JSON-RPC.
 - Preserve token validation on every queue request.
 - Preserve the non-blocking Console start. Do not replace the daemon worker with a blocking loop.

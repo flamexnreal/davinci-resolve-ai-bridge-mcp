@@ -137,3 +137,13 @@ The updated bridge only resets nodes tagged as its own. User-made and older unta
 ## Existing client configuration was not updated
 
 Malformed JSON or an unexpected structure is preserved rather than overwritten. Fix the existing configuration, then rerun setup. Successful merges create a timestamped .backup file next to the original.
+
+## Unknown outcome, busy worker, or stale context
+
+Do not repeat an edit after a client timeout or direct-dispatch connection failure. A native operation may already have applied it or may still be running. The timeout includes the queue request ID; inspect `requests/<id>.json` under the runtime and fresh Resolve state. `running` after a crash is uncertain, not confirmed cancellation. `failed` can include partial edits: inspect the error and timeline. A heartbeat's `busy`/`state` fields describe the worker, while project/timeline details remain cached during jobs. Expired work is rejected before dispatch. Session/context errors require restarting outdated workers or inspecting the intended timeline before submitting a new request.
+
+## Interrupted installation or rollback
+
+Stop MCP clients and the Console worker before installing or recovering. A fresh worker heartbeat blocks installation. If the installer was killed, first verify no installer process remains, then remove the sibling `.resolve-ai-bridge.install-lock` directory and rerun installation. If the runtime is missing, the installer restores `.resolve-ai-bridge.previous` before staging again. For manual rollback, move the current runtime aside and rename `.resolve-ai-bridge.previous` to `.resolve-ai-bridge`. Retain both directories until verified. Earlier backups have timestamp suffixes. Abandoned `.stage-*` directories can be removed after recovery.
+
+The private environment is invoked through its Python executable (`python -m pip` for maintenance); generated standalone dependency scripts can retain staging paths. Stop/restart clients and the Console worker after activation. `--skip-deps` is for file/setup diagnostics, not a verified usable MCP installation. Client/menu setup failures after activation do not roll back runtime files; rerun setup. Use `python3 tools/doctor.py --offline` to avoid all Resolve calls.

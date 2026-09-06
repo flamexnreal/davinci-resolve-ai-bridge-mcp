@@ -52,26 +52,83 @@ def venv_python():
 
 
 def copy_runtime():
+    """Copy into a staging directory, never remove a working bridge."""
     HOME.mkdir(parents=True, exist_ok=True)
     for folder in ("inbox", "outbox", "logs"):
         (HOME / folder).mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "agent" / "ResolveConsole.py", HOME / "ResolveConsole.py")
+    shutil.copytree(ROOT / "bridge", HOME / "bridge",
+                    ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
+    for source in [HOME / "ResolveConsole.py", * (HOME / "bridge").glob("*.py")]:
+        compile(source.read_text(encoding="utf-8"), str(source), "exec")
+    for name in ("operations.py", "server.py", "client.py", "transport.py"):
+        if not (HOME / "bridge" / name).is_file():
+            fail("Incomplete staged runtime: " + name)
 
-    source_agent = ROOT / "agent" / "ResolveConsole.py"
-    if not source_agent.exists():
-        fail("agent/ResolveConsole.py is missing. Download or clone the complete repository.")
-    shutil.copy2(source_agent, HOME / "ResolveConsole.py")
 
-    source_bridge = ROOT / "bridge"
-    if not (source_bridge / "operations.py").exists():
-        fail("bridge/operations.py is missing. Download or clone the complete repository.")
-    target_bridge = HOME / "bridge"
-    if target_bridge.exists():
-        shutil.rmtree(target_bridge)
-    shutil.copytree(
-        source_bridge,
-        target_bridge,
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"),
-    )
+def prepare_runtime(skip=False, with_ffmpeg=False):
+    """Stage dependencies before activation; retain previous runtime for recovery.
+
+    A rename gap is recoverable on the next run, including after a hard kill.
+    Stop MCP clients and the Console worker before updating.
+    """
+    global HOME
+    destination = HOME
+    heartbeat = destination / "agent.json"
+    if heartbeat.exists():
+        try:
+            active = time.time() - float(json.loads(heartbeat.read_text())["time"]) < 25
+        except (ValueError, KeyError, OSError, TypeError):
+            active = True
+        if active:
+            fail("Stop the Console worker and MCP clients before updating this runtime.")
+    previous = destination.with_name(destination.name + ".previous")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    lock = destination.with_name(destination.name + ".install-lock")
+    try:
+        lock.mkdir()
+    except FileExistsError:
+        fail("Another install may be running. If it stopped, remove %s and retry." % lock)
+    stage = None
+    try:
+        if not destination.exists() and previous.exists():
+            os.replace(previous, destination)
+        stage = Path(tempfile.mkdtemp(prefix=destination.name + ".stage-", dir=destination.parent))
+        HOME = stage
+        copy_runtime()
+        if (destination / ".venv").is_dir():
+            shutil.copytree(destination / ".venv", stage / ".venv", symlinks=True)
+        install_dependencies(skip=skip)
+        if with_ffmpeg:
+            install_source_decoder()
+        if not skip:
+            subprocess.run([str(venv_python()), "-c", "import mcp; import bridge.server"],
+                           cwd=stage, check=True)
+        # Preserve local state only after staging has succeeded. Updates require
+        # stopped clients: copying a live queue cannot be made transactional.
+        if destination.exists():
+            for item in destination.iterdir():
+                if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json"}:
+                    target = stage / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, target, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, target)
+        if previous.exists():
+            os.replace(previous, previous.with_name(previous.name + "-%d" % time.time_ns()))
+        if destination.exists():
+            os.replace(destination, previous)
+        try:
+            os.replace(stage, destination)
+        except BaseException:
+            if previous.exists() and not destination.exists():
+                os.replace(previous, destination)
+            raise
+    finally:
+        HOME = destination
+        if stage is not None and stage.exists():
+            shutil.rmtree(stage)
+        lock.rmdir()
 
 
 def get_token(rotate=False):
@@ -510,12 +567,9 @@ def main():
     print("Runtime: %s" % HOME)
     print("System:  %s %s\n" % (platform.system(), platform.release()))
 
-    copy_runtime()
-    print("[0/5] Copied the Console worker and MCP bridge.")
+    prepare_runtime(skip=args.skip_deps, with_ffmpeg=args.with_ffmpeg)
+    print("[0/5] Activated validated runtime; previous installation retained.")
     token = get_token(rotate=args.rotate_token)
-    install_dependencies(skip=args.skip_deps)
-    if args.with_ffmpeg:
-        install_source_decoder()
     print("[3/5] Writing the authenticated MCP configuration...")
     _entry, _config, claude_line, codex_line = write_configs(token)
     menu_paths = [] if args.no_menu else install_menu_scripts()

@@ -257,6 +257,10 @@ class ResolveRuntime:
         self.last_heartbeat = 0.0
         self.served = 0
         self.log_path = LOGS / "agent.log"
+        self.session = uuid.uuid4().hex
+        self.snapshot = {}
+        self.state = {"state": "idle", "busy": False}
+        (HOME / "requests").mkdir(exist_ok=True)
 
     def log(self, message):
         try:
@@ -267,7 +271,7 @@ class ResolveRuntime:
             pass
 
     def alive(self):
-        return self.thread is not None and self.thread.is_alive() and not self.stop_event.is_set()
+        return self.thread is not None and self.thread.is_alive()
 
     def start(self):
         if self.alive():
@@ -286,7 +290,6 @@ class ResolveRuntime:
             daemon=not keepalive,
         )
         self.thread.start()
-        self.summary()
 
     def stop(self):
         self.stop_event.set()
@@ -295,11 +298,7 @@ class ResolveRuntime:
 
     def summary(self):
         """Short, friendly confirmation. The installer already wrote every config file."""
-        status = {}
-        try:
-            status = self.operations.dispatch("status", {})
-        except Exception:
-            pass
+        status = dict(self.snapshot)
         print("\n" + "=" * 68)
         print("RESOLVE AI BRIDGE READY")
         print("Version %s  |  worker requests served: %d" % (AGENT_VERSION, self.served))
@@ -353,15 +352,32 @@ class ResolveRuntime:
     # Kept as an alias so older instructions and screenshots still work.
     banner = summary
 
+    def _refresh_snapshot(self):
+        payload = self.operations.heartbeat_payload()
+        try:
+            payload["context"] = self.operations.queue_context()
+        except Exception:
+            payload["context"] = None
+        self.snapshot = payload
+
     def _heartbeat(self):
-        payload = self.operations.heartbeat_payload({
-            "started_at": self.started_at,
-            "thread_alive": True,
-            "served": self.served,
-            "agent_version": AGENT_VERSION,
-        })
+        # This reporter only reads Python data, never Resolve objects.
+        payload = dict(self.snapshot)
+        payload.update(self.state)
+        payload.update(time=time.time(), session=self.session, queue_protocol=2,
+                       thread_alive=self.alive(), served=self.served,
+                       started_at=self.started_at, agent_version=AGENT_VERSION)
         _atomic_json(HEARTBEAT_FILE, payload)
         self.last_heartbeat = time.time()
+
+    def _report(self):
+        while not self.stop_event.wait(1):
+            if self.thread is None or not self.thread.is_alive():
+                return
+            try:
+                self._heartbeat()
+            except Exception as exc:
+                self.log("Heartbeat failed: %s" % exc)
 
     def _process(self, path):
         request_id = path.stem
@@ -375,23 +391,50 @@ class ResolveRuntime:
                 raise RuntimeError(
                     "Bridge token mismatch. Re-run install.py and update your AI client's MCP entry."
                 )
-            try:
-                import importlib
-                importlib.reload(operations)
-                self.operations = operations.ResolveOperations(
-                    lambda: self.resolve, token_id=self.token_id, transport="console"
-                )
-            except Exception:
-                pass
+            record = HOME / "requests" / (request_id + ".json")
+            fingerprint = hashlib.sha256(json.dumps(request, sort_keys=True).encode()).hexdigest()
+            if record.exists():
+                previous = _read_json(record)
+                if previous.get("fingerprint") != fingerprint:
+                    raise RuntimeError("Request identity reused with different content; refused.")
+                if previous.get("state") == "running":
+                    raise RuntimeError("Previous execution outcome unknown; request will not be replayed.")
+                _atomic_json(OUTBOX / path.name, previous)
+                path.unlink(missing_ok=True)
+                return
+            response["fingerprint"] = fingerprint
+            if float(request.get("deadline", 0)) <= time.time():
+                raise RuntimeError("Request expired before execution; no operation started.")
+            if request.get("session") != self.session:
+                raise RuntimeError("Worker session changed; inspect context and submit a new request.")
+            # All operations except inspection require a stable submission context.
+            if request.get("op") not in operations.QUEUE_READ_ONLY:
+                if not request.get("context") or request["context"] != self.operations.queue_context():
+                    raise RuntimeError("Project/timeline context changed or unavailable; no edit started.")
+            if float(request.get("deadline", 0)) <= time.time():
+                raise RuntimeError("Request expired during validation; no operation started.")
+            response.update(fingerprint=fingerprint, state="running")
+            _atomic_json(record, response)
+            self.state = {"state": "running", "busy": True, "request_id": request_id}
             response["result"] = self.operations.dispatch(
                 str(request.get("op", "")), request.get("params") or {}
             )
+            try:
+                response["context"] = self.operations.queue_context()
+            except Exception:
+                response["context"] = None
+            response["session"] = self.session
             response["ok"] = True
             self.served += 1
         except Exception as exc:
             response["error"] = str(exc)
             response["traceback"] = traceback.format_exc(limit=8)
             self.log("Request %s failed: %s" % (request_id, exc))
+        response["state"] = "completed" if response["ok"] else "failed"
+        # Preserve a running journal on uncertain failures writing the final result.
+        if response.get("fingerprint"):
+            _atomic_json(HOME / "requests" / (request_id + ".json"), response)
+        self.state = {"state": response["state"], "busy": False, "request_id": request_id}
         response["took_ms"] = int((time.time() - started) * 1000)
         _atomic_json(OUTBOX / (request_id + ".json"), response)
         try:
@@ -402,17 +445,25 @@ class ResolveRuntime:
     def _loop(self):
         self.log("Worker %s started with token id %s" % (AGENT_VERSION, self.token_id))
         try:
+            self._refresh_snapshot()
             self._heartbeat()
+            self.summary()
+            threading.Thread(target=self._report, daemon=True).start()
+            refreshed = 0.0
             while not self.stop_event.wait(0.08):
                 now = time.time()
-                if now - self.last_heartbeat >= 2.0:
+                if now - refreshed >= 2.0:
+                    refreshed = now
                     try:
-                        self._heartbeat()
+                        self._refresh_snapshot()
                     except Exception as exc:
                         self.log("Heartbeat failed: %s" % exc)
                 for path in sorted(INBOX.glob("*.json"))[:8]:
+                    if self.stop_event.is_set():
+                        break
                     try:
                         self._process(path)
+                        self._refresh_snapshot()
                     except Exception as exc:
                         self.log("Could not process %s: %s" % (path.name, exc))
         finally:
@@ -428,7 +479,6 @@ def start_bridge(namespace=None):
     _ensure_dirs()
     existing = getattr(builtins, RUNTIME_KEY, None)
     if existing is not None and getattr(existing, "alive", lambda: False)():
-        existing.resolve = _get_resolve(namespace)
         print("Resolve AI Bridge is already running in this Resolve session.")
         existing.summary()
         return existing
