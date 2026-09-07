@@ -1,5 +1,24 @@
 # Release Notes
 
+## v1.12.0 — One-click startup in Resolve Free (2026-09-06)
+
+This release brings 1-click startup to DaVinci Resolve Free directly from the Workspace menu, prevents background crashes during startup, and adds clean process locking and shutdown controls.
+
+### Added
+- **1-Click Free Menu Startup**: Choose `Workspace > Scripts > Resolve AI Bridge > Start AI Bridge` to start the bridge worker directly using Resolve's built-in API connection, eliminating the need to paste code into the Console.
+- **Cross-Process Worker Lock**: Added an OS worker lock and update exclusion so repeated menu starts reuse the running worker instead of creating duplicate competing processes.
+- **Session-Bound Clean Stop**: `Stop AI Bridge` cleanly stops the worker after any active operation finishes, and quitting Resolve automatically cleans up the background script process.
+- **Fast Console Fallback**: The Console startup line remains fully supported with a one-second handshake for users who prefer starting via the DaVinci Resolve Console.
+
+### Fixed
+- **Startup Crash Prevention**: Fixed background thread output issues that could trigger Python capsule and system errors during startup in DaVinci Resolve Free.
+- **Zero Overhead**: No new dependencies, listening ports, public MCP tools, or AI calls added.
+
+### Validation & Limits
+- Live startup and lifecycle verified on macOS with **DaVinci Resolve Free 21.0.3.7** and **Python 3.14.6** (menu start, queue status, repeated start, Stop, quit/reopen, and Console fallback).
+- Windows, Linux, and other Python/Resolve versions were not live-tested for this specific fix. Timeline editing capabilities remain unchanged.
+
+
 ## v1.11.0 — Concurrency protection, guarded edits and crash-proof updates (2026-09-06)
 
 This release hardens the bridge against accidental duplicate edits, prevents tasks from targeting the wrong timeline, eliminates false timeouts during long operations, and makes installations crash-proof with automatic rollback.

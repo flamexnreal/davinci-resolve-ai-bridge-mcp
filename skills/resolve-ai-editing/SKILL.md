@@ -19,7 +19,7 @@ Before analyzing audio, generating subtitles/captions, rendering motion graphics
 
 ## Required Workflow
 
-1. Call `resolve_status` before every editing session. It reports which transport is live.
+1. Call `resolve_status` before every editing session. It reports which transport is live. If offline, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per Resolve session. On the tested macOS Free build it starts directly; use the portable Py3 Console line only if automatic startup fails.
 2. Call `timeline_overview` before proposing an edit.
 3. Summarize what is open and identify ambiguities.
 4. State a short plan before changing the timeline.

@@ -17,6 +17,7 @@ from pathlib import Path
 
 
 from bridge.operations import AGENT_VERSION as VERSION
+from bridge.lifecycle import WorkerLock
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 TOKEN_FILE = HOME / "token.txt"
@@ -61,7 +62,7 @@ def copy_runtime():
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
     for source in [HOME / "ResolveConsole.py", * (HOME / "bridge").glob("*.py")]:
         compile(source.read_text(encoding="utf-8"), str(source), "exec")
-    for name in ("operations.py", "server.py", "client.py", "transport.py"):
+    for name in ("operations.py", "server.py", "client.py", "transport.py", "lifecycle.py"):
         if not (HOME / "bridge" / name).is_file():
             fail("Incomplete staged runtime: " + name)
 
@@ -90,9 +91,14 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
     except FileExistsError:
         fail("Another install may be running. If it stopped, remove %s and retry." % lock)
     stage = None
+    worker_lock = None
     try:
         if not destination.exists() and previous.exists():
             os.replace(previous, destination)
+        if destination.exists():
+            worker_lock = WorkerLock(destination)
+            if not worker_lock.acquire():
+                fail("Stop the running bridge worker before updating this runtime.")
         stage = Path(tempfile.mkdtemp(prefix=destination.name + ".stage-", dir=destination.parent))
         HOME = stage
         copy_runtime()
@@ -108,7 +114,7 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
         # stopped clients: copying a live queue cannot be made transactional.
         if destination.exists():
             for item in destination.iterdir():
-                if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json"}:
+                if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json", "worker.lock", "stop.json"}:
                     target = stage / item.name
                     if item.is_dir():
                         shutil.copytree(item, target, dirs_exist_ok=True)
@@ -128,6 +134,8 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
         HOME = destination
         if stage is not None and stage.exists():
             shutil.rmtree(stage)
+        if worker_lock is not None:
+            worker_lock.release()
         lock.rmdir()
 
 
@@ -632,14 +640,14 @@ def main():
             print("        Check detail: %s" % direct["reason"])
 
     if menu_paths:
-        print("\nSTEP 3  Console launcher helper:")
+        print("\nSTEP 3  Start the bridge in Resolve (Free or Studio):")
         print("        Restart DaVinci Resolve once, then choose")
         print("        Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.")
-        print("        It prints the exact Py3 Console command into Resolve's Console for easy copy-pasting.")
+        print("        It starts the worker directly; no Console paste is needed on supported builds.")
         for path in menu_paths:
             print("          %s" % path)
 
-    print("\n        Direct Console command (Workspace > Console, Py3 tab):")
+    print("\n        Fallback Console command (Workspace > Console, Py3 tab):")
     print("          %s" % CONSOLE_LINE)
     print("        The same line is saved at %s" % (HOME / "console-command.txt"))
 

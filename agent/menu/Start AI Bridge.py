@@ -1,55 +1,28 @@
 #!/usr/bin/env python
-"""Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.
-
-Copies the activation command to clipboard and explains the Py3 step.
-"""
-
+"""Start the worker using the API object Resolve supplies to its menu scripts."""
 import os
-import subprocess
 import sys
 
-HOME = os.path.expanduser(
-    os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge")
-)
-PORTABLE_CMD = (
-    'import os;exec(open(os.path.expanduser('
-    '"~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())'
-)
-
-
-def _copy_to_clipboard(text):
-    try:
-        if sys.platform == "darwin":
-            p = subprocess.Popen("pbcopy", stdin=subprocess.PIPE)
-            p.communicate(text.encode("utf-8"))
-            return True
-        elif sys.platform.startswith("win"):
-            p = subprocess.Popen("clip", stdin=subprocess.PIPE)
-            p.communicate(text.encode("utf-8"))
-            return True
-    except Exception:
-        pass
-    return False
+HOME = os.path.expanduser(os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge"))
+AGENT = os.path.join(HOME, "ResolveConsole.py")
+PORTABLE_CMD = 'import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())'
 
 
 def main():
-    copied = _copy_to_clipboard(PORTABLE_CMD)
-    paste_key = "Cmd+V" if sys.platform == "darwin" else "Ctrl+V"
-    print("\n" + "=" * 72)
-    print("RESOLVE AI BRIDGE ACTIVATION")
-    print("=" * 72)
-    if copied:
-        print("[AUTO-COPIED] The activation command is already in your clipboard!\n")
-    print("Command to paste (if it didn't copy automatically):")
-    print("   " + PORTABLE_CMD + "\n")
-    print("Next steps:")
-    print("1. Click the 'Py3' tab at the top of this Console window.")
-    print("2. Press %s (Paste) and hit Enter." % paste_key)
-    print("=" * 72 + "\n")
+    try:
+        if not os.path.isfile(AGENT):
+            raise RuntimeError("Resolve AI Bridge is not installed. Run install.py first.")
+        if HOME not in sys.path:
+            sys.path.insert(0, HOME)
+        # An isolated namespace avoids overwriting this launcher's globals.
+        namespace = dict(globals(), __file__=AGENT, RESOLVE_AI_BRIDGE_MANUAL_START=True)
+        with open(AGENT, encoding="utf-8") as handle:
+            exec(compile(handle.read(), AGENT, "exec"), namespace)
+        namespace["start_menu_bridge"](namespace)
+    except Exception as exc:
+        print("\nRESOLVE AI BRIDGE DID NOT START: %s" % exc)
+        print("Fallback: Workspace > Console, select Py3, paste and press Enter:")
+        print(PORTABLE_CMD)
 
 
-if __name__ == "__main__":
-    main()
-
-
-
+main()

@@ -1,33 +1,21 @@
 #!/usr/bin/env python
-"""Workspace > Scripts > Resolve AI Bridge > Stop AI Bridge.
-
-Ends the worker started in this Resolve session. Your AI client then reports
-the bridge as offline until it is started again.
-"""
-
+"""Stop the session's worker, including workers in another menu process."""
 import os
 import sys
 
-HOME = os.path.expanduser(
-    os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge")
-)
-AGENT = os.path.join(HOME, "ResolveConsole.py")
-
 
 def main():
-    if not os.path.isfile(AGENT):
-        print("Resolve AI Bridge is not installed. Nothing to stop.")
-        return
-    if HOME not in sys.path:
-        sys.path.insert(0, HOME)
-    os.environ["RESOLVE_AI_BRIDGE_NO_AUTOSTART"] = "1"
+    home = os.path.expanduser(os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge"))
+    if home not in sys.path:
+        sys.path.insert(0, home)
     try:
-        with open(AGENT, encoding="utf-8") as handle:
-            source = handle.read()
-        exec(compile(source, AGENT, "exec"), globals())
-        globals()["stop_bridge"]()
-    finally:
-        os.environ.pop("RESOLVE_AI_BRIDGE_NO_AUTOSTART", None)
+        from bridge.lifecycle import request_stop
+        if request_stop(home):
+            print("Stop requested. The worker will stop after its current operation finishes.")
+        else:
+            print("Resolve AI Bridge is not running.")
+    except Exception as exc:
+        print("Could not stop Resolve AI Bridge: %s" % exc)
 
 
 main()

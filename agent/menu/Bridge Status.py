@@ -36,14 +36,14 @@ def main():
     if heartbeat:
         age = time.time() - float(heartbeat.get("time", 0))
         state = "running" if age < 25 else "stale (%.0fs old)" % age
-        print("\nConsole worker: %s" % state)
+        print("\nBridge worker: %s" % state)
         print("  Project:  %s" % (heartbeat.get("project") or "none open"))
         print("  Timeline: %s" % (heartbeat.get("timeline") or "none open"))
         print("  Requests served: %s" % heartbeat.get("served", 0))
         print("  Version: %s" % heartbeat.get("agent_version", "unknown"))
     else:
-        print("\nConsole worker: not running")
-        print("  Start it with the script printed by Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (in Py3 Console).")
+        print("\nBridge worker: not running")
+        print("  Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.")
         print("  Your AI client may still reach Resolve directly, which needs no worker.")
 
     config = os.path.join(HOME, "mcp-config.json")

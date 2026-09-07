@@ -91,11 +91,11 @@ const faq = [
   },
   {
     q: "Do I have to redo a step every time I open Resolve?",
-    a: "In Resolve Free, start the Console worker once per session: run the menu launcher, select Py3, paste the copied command and press Enter. Direct attach can avoid this step when external scripting is available.",
+    a: "In Resolve Free, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. It starts the worker without a Console paste on supported builds. Menu startup is verified on macOS Free 21.0.3.7; other builds retain the Py3 Console fallback.",
   },
   {
     q: "Does this work on free DaVinci Resolve?",
-    a: "Yes, the Free workflow runs inside Resolve's Console. Review tools use ordinary timeline APIs, not Studio AI features. Individual operations still depend on your Resolve build; source capture excludes timeline effects and needs FFmpeg.",
+    a: "Yes, the Free workflow uses the connection Resolve supplies to its internal scripts. Review tools use ordinary timeline APIs, not Studio AI features. Individual operations still depend on your Resolve build; source capture excludes timeline effects and needs FFmpeg.",
   },
   {
     q: "Why did my image only last one frame?",
@@ -243,7 +243,7 @@ export default function App() {
           {[
             ["01", "MCP server", "Gives your AI a focused set of editing tools and returns Resolve's real answer, never a guess."],
             ["02a", "Direct attach", "The default. The MCP process talks to the open Resolve through Blackmagic's own scripting library, so nothing has to be started inside Resolve."],
-            ["02b", "Console worker", "The fallback. A one-click worker inside Resolve reads token-protected JSON from ~/.resolve-ai-bridge. No network port is opened."],
+            ["02b", "Console worker", "The fallback. A menu-started worker reads token-protected JSON from ~/.resolve-ai-bridge. No network port is opened."],
           ].map(([n, title, text], i) => (
             <div key={title} className={`py-8 md:px-8 ${i > 0 ? "border-t border-slate-300 md:border-l md:border-t-0" : ""}`}>
               <span className="font-mono text-xs text-blue-700">{n}</span>
@@ -296,7 +296,7 @@ export default function App() {
         <Reveal className="mt-16 grid gap-0 border-y border-slate-300 md:grid-cols-3">
           {[
             ["Route 1 - default", "Just open Resolve", "Open Resolve and your project. The MCP server finds it. To switch the bridge off, disconnect or disable the MCP server in your AI client."],
-            ["Route 2 - launcher helper", "Workspace > Scripts", "Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge. It outputs the exact Py3 activation script directly into your Resolve Console window to paste into the Py3 tab."],
+            ["Route 2 - one-click start", "Workspace > Scripts", "Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge. The worker starts directly; confirm with resolve_status. No Console paste is needed on the tested macOS Free 21.0.3.7 build."],
             ["Route 3 - fallback", "One portable line", "Paste the line below into Workspace > Console with the Py3 tab selected. It is the same text on every computer."],
           ].map(([n, title, text], i) => (
             <div key={title} className={`py-8 md:px-8 ${i > 0 ? "border-t border-slate-300 md:border-l md:border-t-0" : ""}`}>
@@ -315,7 +315,7 @@ export default function App() {
           <div className="min-w-0 max-w-3xl">
             <CopyBlock code={consoleCommand} label="Resolve Python 3 Console - identical on macOS and Windows" />
             <div className="mt-5 border-l-2 border-blue-700 pl-5 text-sm leading-6 text-slate-600">
-              <p>The worker runs on a daemon thread, so the Console stays usable. Stop it from <strong>Workspace &gt; Scripts &gt; Resolve AI Bridge &gt; Stop AI Bridge</strong>, or with <code>__resolve_ai_bridge_runtime__.stop()</code>.</p>
+              <p>The menu worker keeps a separate script process alive while Resolve remains usable. The Console fallback returns after a short startup handshake. Stop it from <strong>Workspace &gt; Scripts &gt; Resolve AI Bridge &gt; Stop AI Bridge</strong>, or quit Resolve.</p>
             </div>
           </div>
         </Reveal>

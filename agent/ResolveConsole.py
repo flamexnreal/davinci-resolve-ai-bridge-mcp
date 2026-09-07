@@ -1,22 +1,12 @@
 """Resolve AI Bridge Console worker.
 
-Three ways to start this file, all equivalent:
+Start from Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, or paste:
 
-1. Workspace > Scripts > Resolve AI Bridge > Start AI Bridge  (one click)
-2. Paste the one line from ~/.resolve-ai-bridge/console-command.txt into
-   Workspace > Console with the Py3 tab selected. It contains no personal
-   paths, so there is nothing to edit:
+    import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
 
-       import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
-
-3. Nothing at all, when the MCP server can attach to Resolve directly. Run
-   ``python3 tools/doctor.py`` to see which route your machine uses.
-
-The worker captures Resolve's injected API object, starts a background thread,
-and returns control to the Console immediately. The Workspace Scripts launcher
-uses a non-daemon thread because Resolve may tear down a one-shot menu-script
-context as soon as the launcher returns. It only depends on the standard
-library and on ``bridge/operations.py``, which the installer places beside it.
+The Console route returns after a startup handshake capped at one second. The menu route
+holds Resolve's separate fuscript process open until stopped or Resolve exits.
+Both use the same authenticated queue and a single operation worker.
 """
 
 import builtins
@@ -65,6 +55,8 @@ def _import_operations():
 
 
 operations = _import_operations()
+from bridge import lifecycle
+
 AGENT_VERSION = operations.AGENT_VERSION
 PROTOCOL_VERSION = operations.PROTOCOL_VERSION
 
@@ -122,86 +114,6 @@ def _injected(name, namespace=None):
     return getattr(builtins, name, None)
 
 
-def _scriptapp_from_disk():
-    """Obtain Resolve's API object without relying on injected globals.
-
-    A Console paste always inherits ``resolve`` from the Console's namespace, but
-    a Workspace > Scripts invocation does not always inject it into the script's
-    own globals. Resolve's own interpreter can still import its scripting module,
-    so this reproduces what Blackmagic's ``DaVinciResolveScript`` does: import the
-    native module and ask it for the app. This is the difference between the menu
-    launcher working and the user having to paste into the Console.
-    """
-    attempts = []
-
-    # Resolve's interpreter usually has both of these importable already.
-    for module_name in ("fusionscript", "DaVinciResolveScript"):
-        try:
-            module = __import__(module_name)
-        except Exception as exc:
-            attempts.append("import %s (%s)" % (module_name, exc))
-            continue
-        for getter in ("scriptapp", "GetResolve"):
-            call = getattr(module, getter, None)
-            if call is None:
-                continue
-            try:
-                candidate = call("Resolve") if getter == "scriptapp" else call()
-            except Exception as exc:
-                attempts.append("%s.%s (%s)" % (module_name, getter, exc))
-                continue
-            if candidate is not None and hasattr(candidate, "GetProjectManager"):
-                return candidate, attempts
-
-    # Fall back to loading the native library straight off disk.
-    import importlib.machinery
-    import importlib.util
-
-    for path in _library_candidates():
-        if not os.path.isfile(path):
-            attempts.append("%s (not found)" % path)
-            continue
-        try:
-            loader = importlib.machinery.ExtensionFileLoader("fusionscript", path)
-            spec = importlib.util.spec_from_loader("fusionscript", loader)
-            module = importlib.util.module_from_spec(spec)
-            loader.exec_module(module)
-            candidate = module.scriptapp("Resolve")
-        except Exception as exc:
-            attempts.append("%s (%s)" % (path, exc))
-            continue
-        if candidate is not None and hasattr(candidate, "GetProjectManager"):
-            return candidate, attempts
-        attempts.append("%s (loaded, but Resolve did not answer)" % path)
-    return None, attempts
-
-
-def _library_candidates():
-    """Absolute paths to Resolve's scripting library, most specific first."""
-    candidates = []
-    override = os.environ.get("RESOLVE_SCRIPT_LIB", "").strip()
-    if override:
-        candidates.append(override)
-    if sys.platform.startswith("darwin"):
-        candidates.append(
-            "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/"
-            "Libraries/Fusion/fusionscript.so"
-        )
-    elif os.name == "nt":
-        program_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        candidates.append(
-            os.path.join(program_files, "Blackmagic Design", "DaVinci Resolve", "fusionscript.dll")
-        )
-    else:
-        candidates.append("/opt/resolve/libs/Fusion/fusionscript.so")
-        candidates.append("/home/resolve/libs/Fusion/fusionscript.so")
-    unique = []
-    for candidate in candidates:
-        if candidate and candidate not in unique:
-            unique.append(candidate)
-    return unique
-
-
 def _get_resolve(namespace=None):
     candidate = _injected("resolve", namespace)
     if candidate is not None and hasattr(candidate, "GetProjectManager"):
@@ -218,25 +130,10 @@ def _get_resolve(namespace=None):
         except Exception:
             pass
 
-    bmd = _injected("bmd", namespace)
-    if bmd is not None:
-        try:
-            candidate = bmd.scriptapp("Resolve")
-            if candidate is not None and hasattr(candidate, "GetProjectManager"):
-                return candidate
-        except Exception:
-            pass
-
-    candidate, attempts = _scriptapp_from_disk()
-    if candidate is not None:
-        return candidate
-
     raise RuntimeError(
-        "Resolve's API object was not found. Open a project first, and check "
-        "Preferences > System > General > External scripting using is not set to None. "
-        "Then retry Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, or paste the one "
-        "line from ~/.resolve-ai-bridge/console-command.txt into Workspace > Console (Py3 tab). "
-        "Attach attempts: %s" % ("; ".join(attempts) or "none")
+        "Resolve's injected API object was not found. Open a project and run the "
+        "Workspace > Scripts launcher, or use the Py3 Console fallback. "
+        "External scripting is not required for Resolve Free."
     )
 
 
@@ -253,6 +150,10 @@ class ResolveRuntime:
         )
         self.stop_event = threading.Event()
         self.thread = None
+        self.reporter = None
+        self.failure = None
+        self.ready = threading.Event()
+        self.worker_lock = None
         self.started_at = time.time()
         self.last_heartbeat = 0.0
         self.served = 0
@@ -279,15 +180,8 @@ class ResolveRuntime:
             self.summary()
             return
         self.stop_event.clear()
-        # Resolve runs Workspace scripts in a short-lived interpreter context.
-        # A daemon thread is killed when that context returns, often before the
-        # first heartbeat is written. The menu launcher opts into a non-daemon
-        # worker; a pasted Console command keeps the historical daemon behavior.
-        keepalive = bool(globals().get("RESOLVE_AI_BRIDGE_KEEPALIVE"))
         self.thread = threading.Thread(
-            target=self._loop,
-            name="ResolveAIBridge",
-            daemon=not keepalive,
+            target=self._loop, name="ResolveAIBridge", daemon=True,
         )
         self.thread.start()
 
@@ -304,7 +198,7 @@ class ResolveRuntime:
         print("Version %s  |  worker requests served: %d" % (AGENT_VERSION, self.served))
         print("Project:  %s" % (status.get("project") or "none open"))
         print("Timeline: %s" % (status.get("timeline") or "none open"))
-        print("Resolve:  %s %s" % (status.get("product") or "", status.get("version") or ""))
+        print("Resolve:  %s %s" % (status.get("product") or "", status.get("resolve_version") or ""))
         print("")
         print("Your AI client needs no token typed by hand. The filled configuration is at:")
         print("  %s" % (HOME / "mcp-config.json"))
@@ -312,7 +206,7 @@ class ResolveRuntime:
         print("  Claude Code: %s" % (HOME / "claude-command.txt"))
         print("  Codex:       %s" % (HOME / "codex-command.txt"))
         print("")
-        print("Stop this worker with: %s.stop()" % RUNTIME_KEY)
+        print("Stop: Workspace > Scripts > Resolve AI Bridge > Stop AI Bridge")
         print("=" * 68 + "\n")
 
     def print_details(self):
@@ -366,7 +260,8 @@ class ResolveRuntime:
         payload.update(self.state)
         payload.update(time=time.time(), session=self.session, queue_protocol=2,
                        thread_alive=self.alive(), served=self.served,
-                       started_at=self.started_at, agent_version=AGENT_VERSION)
+                       started_at=self.started_at, agent_version=AGENT_VERSION,
+                       menu_lifecycle=1, pid=os.getpid())
         _atomic_json(HEARTBEAT_FILE, payload)
         self.last_heartbeat = time.time()
 
@@ -447,10 +342,14 @@ class ResolveRuntime:
         try:
             self._refresh_snapshot()
             self._heartbeat()
-            self.summary()
-            threading.Thread(target=self._report, daemon=True).start()
+            self.reporter = threading.Thread(target=self._report, daemon=True)
+            self.reporter.start()
+            self.ready.set()
             refreshed = 0.0
             while not self.stop_event.wait(0.08):
+                if lifecycle.consume_stop(HOME, self.session, self.token):
+                    self.stop_event.set()
+                    break
                 now = time.time()
                 if now - refreshed >= 2.0:
                     refreshed = now
@@ -459,6 +358,8 @@ class ResolveRuntime:
                     except Exception as exc:
                         self.log("Heartbeat failed: %s" % exc)
                 for path in sorted(INBOX.glob("*.json"))[:8]:
+                    if lifecycle.consume_stop(HOME, self.session, self.token):
+                        self.stop_event.set()
                     if self.stop_event.is_set():
                         break
                     try:
@@ -466,27 +367,96 @@ class ResolveRuntime:
                         self._refresh_snapshot()
                     except Exception as exc:
                         self.log("Could not process %s: %s" % (path.name, exc))
+        except Exception:
+            self.failure = traceback.format_exc()
+            self.log("Worker failed: " + self.failure)
         finally:
+            self.ready.set()
+            self.stop_event.set()
+            if self.reporter is not None and self.reporter.is_alive():
+                self.reporter.join()
             try:
                 HEARTBEAT_FILE.unlink()
             except OSError:
                 pass
             self.log("Worker stopped")
+            if self.worker_lock is not None:
+                self.worker_lock.release()
 
 
-def start_bridge(namespace=None):
+def start_bridge(namespace=None, menu=False):
     """Start or reuse the worker. ``namespace`` carries Resolve's injected globals."""
-    _ensure_dirs()
     existing = getattr(builtins, RUNTIME_KEY, None)
     if existing is not None and getattr(existing, "alive", lambda: False)():
         print("Resolve AI Bridge is already running in this Resolve session.")
         existing.summary()
         return existing
-    runtime = ResolveRuntime(_get_resolve(namespace))
-    setattr(builtins, RUNTIME_KEY, runtime)
-    globals()[RUNTIME_KEY] = runtime
-    runtime.start()
-    return runtime
+    install_lock = HOME.with_name(HOME.name + ".install-lock")
+    if install_lock.exists():
+        raise RuntimeError("An installation is in progress. Retry Start after it finishes.")
+    lock = lifecycle.WorkerLock(HOME)
+    if not lock.acquire():
+        print("Resolve AI Bridge already has a worker (possibly starting or busy). "
+              "Use Bridge Status to check it.")
+        return None
+    runtime = None
+    try:
+        if install_lock.exists():
+            raise RuntimeError("An installation is in progress. Retry Start after it finishes.")
+        _ensure_dirs()
+        # An older worker does not own the new OS lock. Never run alongside it.
+        state = lifecycle.fresh_state(HOME)
+        if state and not state.get("menu_lifecycle"):
+            print("An existing worker has a fresh heartbeat. Stop it before starting another.")
+            lock.release()
+            return None
+        runtime = ResolveRuntime(_get_resolve(namespace))
+        runtime.worker_lock = lock
+        setattr(builtins, RUNTIME_KEY, runtime)
+        globals()[RUNTIME_KEY] = runtime
+        runtime.start()
+        if not menu:
+            # Resolve's output stream is not safe from a background Python thread.
+            # Bound this initial handshake; never wait for the long-lived loop.
+            runtime.ready.wait(1.0)
+            if runtime.failure:
+                print("RESOLVE AI BRIDGE DID NOT START: see %s" % runtime.log_path)
+            elif runtime.ready.is_set() and runtime.alive():
+                runtime.summary()
+            else:
+                print("Resolve AI Bridge is starting. Use Bridge Status to check readiness.")
+        return runtime
+    except BaseException:
+        # Once running, only the worker may release its lock, even if output fails.
+        if runtime is None or not runtime.alive():
+            lock.release()
+        raise
+
+
+def start_menu_bridge(namespace=None):
+    host = lifecycle.MenuHost()
+    try:
+        runtime = start_bridge(namespace, menu=host.is_child)
+        if runtime is None or not host.is_child:
+            return runtime
+        print("Menu worker active. Resolve remains usable; Stop AI Bridge ends this worker.")
+        announced = False
+        while runtime.alive():
+            runtime.thread.join(0.5)
+            if runtime.alive() and runtime.last_heartbeat and not announced:
+                runtime.summary()
+                announced = True
+            if not host.alive():
+                # Only this separate fuscript process may exit here. A native
+                # request can be stuck after Resolve closes; do not leave an orphan.
+                runtime.stop_event.set()
+                HEARTBEAT_FILE.unlink(missing_ok=True)
+                os._exit(0)
+        if runtime.failure or not announced:
+            print("RESOLVE AI BRIDGE DID NOT START OR STOPPED: see %s" % runtime.log_path)
+        return runtime
+    finally:
+        host.close()
 
 
 def stop_bridge():
@@ -502,7 +472,8 @@ def stop_bridge():
 _start_bridge = start_bridge
 
 
-if os.environ.get("RESOLVE_AI_BRIDGE_NO_AUTOSTART", "").strip() != "1":
+if (not globals().get("RESOLVE_AI_BRIDGE_MANUAL_START")
+        and os.environ.get("RESOLVE_AI_BRIDGE_NO_AUTOSTART", "").strip() != "1"):
     try:
         start_bridge(globals())
     except Exception as error:

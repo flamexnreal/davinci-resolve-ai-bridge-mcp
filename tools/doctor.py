@@ -147,6 +147,8 @@ def main():
         "Installed operations module",
         str(HOME / "bridge" / "operations.py"),
     )
+    result((HOME / "bridge" / "lifecycle.py").exists(), "Installed worker lifecycle",
+           str(HOME / "bridge" / "lifecycle.py"))
     result(venv_python().exists(), "Private Python", str(venv_python()))
     check_menu_scripts()
 

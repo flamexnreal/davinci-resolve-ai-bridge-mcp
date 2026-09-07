@@ -5,7 +5,7 @@ Read `README.md` and `skills/resolve-ai-editing/SKILL.md` before changing the Py
 ## Architecture rules
 
 - `bridge/operations.py` is the single implementation of every Resolve operation. Add new capability there, not in a transport. It must stay standard library only, and must never import `mcp` or `fusionscript`.
-- `agent/ResolveConsole.py` may depend only on the standard library, `bridge/operations.py`, and Resolve's injected objects.
+- `agent/ResolveConsole.py` may depend only on the standard library, `bridge/operations.py`, `bridge/lifecycle.py`, and Resolve's injected objects.
 - Never import Resolve from `bridge/server.py`, `bridge/client.py`, or `tools/`. Only `bridge/direct.py` loads Resolve's native module, and only in a process that can afford to die.
 - `bridge/direct.py` must keep probing in a disposable subprocess before loading the native module in-process. A native module built for another Python can abort the process, and the MCP server has to survive that.
 - Fall back to the Console queue only before direct dispatch starts. After an unexpected dispatch failure, report an unknown outcome and never replay automatically.
@@ -13,7 +13,8 @@ Read `README.md` and `skills/resolve-ai-editing/SKILL.md` before changing the Py
 - Stage and validate runtime/dependencies before activation; retain the previous runtime. Test installers in temporary directories, with no live client configuration changes.
 - Never write normal output to stdout from `bridge/`; stdio is reserved for MCP JSON-RPC.
 - Preserve token validation on every queue request.
-- Preserve the non-blocking Console start. Do not replace the daemon worker with a blocking loop.
+- Preserve the non-blocking Console start and daemon operation worker. Only a confirmed separate `fuscript` menu process may wait for that worker; never block Resolve's embedded interpreter. Menu-process Console output belongs on the main thread.
+- Keep the cross-process worker lock and authenticated, session-bound Stop signal. Only the separate menu child may exit when its Resolve parent dies.
 - Use absolute installed paths in MCP configuration.
 
 ## Setup rules

@@ -37,3 +37,29 @@ Record Resolve version, edition, OS, decoder, result, and limitations in the rel
 `tests/test_reliability.py` uses mocks and temporary runtime directories: no native Resolve imports or live project edits. It covers uncertain direct dispatch, safe pre-dispatch fallback, deadline rejection, context changes, concurrent clients, duplicate records, busy heartbeat/client timeout and installer failure/interruption. Run the full unittest suite and npm package/build checks. Doctor `--offline` checks installation without contacting Resolve.
 
 Manual Free verification remains required on a disposable project: run a job longer than 25 seconds, observe busy heartbeats and eventual completion after client timeout, queue edits from two clients then switch timelines/projects, confirm stale work is rejected, and restart after an interrupted job to inspect its durable record. Do not use a production project for these checks. Also validate update/recovery on macOS, Windows and Linux. Native calls holding the GIL, UI changes during execution and power-loss filesystem durability are outside mock guarantees.
+
+
+## One-click startup validation
+
+`tests/test_startup.py` covers real cross-process OS locking, crash lock release,
+legacy-worker exclusion, startup/install exclusion, main-thread Console output,
+non-blocking Console startup, duplicate starts, authenticated session-bound Stop,
+and Stop waiting for active work. Native Resolve objects are mocked in these tests.
+
+Live checked on 2026-09-06: macOS, Resolve **Free 21.0.3.7**, Python **3.14.6**,
+with an empty open project. No timeline edits or rendering were needed:
+
+- A Workspace > Scripts invocation receives working injected Resolve objects.
+- It runs as `fuscript`, a child of Resolve, and normally exits when the script returns.
+- Start AI Bridge starts the updated queue worker without opening/pasting into Py3.
+- A real authenticated `status` request succeeds; repeated Start retains one session/PID.
+- Stop from the menu removes the heartbeat and ends the menu worker.
+- Quit Resolve while the worker runs: both processes exit and the heartbeat is removed.
+- Reopen Resolve/project and Start again: a new session serves a real status request.
+- The Py3 Console fallback prints READY, returns control, serves status, and can be stopped from the menu.
+
+The menu worker was about 44 MiB RSS in one idle snapshot (not a cross-platform
+benchmark). No dependency or AI call was added. Existing queue polling remains;
+Stop checks and a twice-per-second parent-lifetime check are the added recurring work.
+Windows/Linux and other Resolve/Python builds have not been live-tested here.
+This evidence validates startup/lifetime, not every editing operation.

@@ -8,7 +8,7 @@
 
 Connect AI assistants to the project open in **DaVinci Resolve Free** through a local MCP bridge. Inspect timelines, place media, animate clips, review edits on duplicate timelines, and analyze source audio. Studio users can use the same bridge.
 
-The Free workflow runs a small worker **inside Resolve's Py3 Console**. It does not need a Studio license, paid AI feature, remote server, or manually entered API token. Availability of individual Resolve operations still depends on your version and media. The bridge cannot unlock Studio-only effects.
+The Free workflow starts a small worker from **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge**, using the connection supplied by Resolve. It does not need a Studio license, paid AI feature, remote server, or manually entered API token. Availability of individual Resolve operations still depends on your version and media. The bridge cannot unlock Studio-only effects.
 
 ## Install
 
@@ -46,16 +46,19 @@ The installer copies the bridge into `~/.resolve-ai-bridge`, creates a private P
 
 1. Open Resolve with a project.
 2. Choose **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge**. Depending on the menu layout, it may appear under **Utility**.
-3. In the Console, select **Py3**, paste the copied command, and press Enter.
-4. Wait for **RESOLVE AI BRIDGE READY**. Create or open a timeline before using timeline tools.
+3. The launcher starts the worker directly. **No Py3 selection, copy/paste, or Enter is needed.** Confirm with your AI client's `resolve_status`, or open **Workspace → Console** to see **RESOLVE AI BRIDGE READY**. Create or open a timeline before using timeline tools.
 
-Portable fallback command for the Py3 Console:
+If automatic startup reports an error on your build, open **Workspace → Console**, select **Py3**, paste this fallback command and press Enter:
 
 ```python
 import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
 ```
 
-Run the worker once each Resolve session. The menu launcher helps copy the command; it does not mean the worker is running until the READY message appears. If the Scripts menu is missing after installation, restart Resolve once.
+Run **Start AI Bridge** once each Resolve session. Use **Stop AI Bridge** in the same menu to stop it; an active operation finishes first. Repeated starts do not create a second worker. If the menu is missing after installation, restart Resolve once.
+
+**Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. Windows/Linux and other Resolve builds still require live verification; the portable fallback remains available.
+
+Resolve may keep the menu script marked busy while its separate `fuscript` process serves requests. Resolve's editing UI remains usable. Closing Resolve ends that process. The Console fallback uses a daemon worker with a startup handshake capped at one second. No new dependency, listening port, public MCP tool, or AI call is added.
 
 When external scripting is available, the bridge can attach directly. Studio users can enable **Preferences → System → General → External scripting using → Local**. Direct attach is probed in a disposable process; when unavailable, the Console transport is used. Free users can stay with the Console workflow.
 

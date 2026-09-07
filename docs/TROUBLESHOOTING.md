@@ -8,8 +8,8 @@ In this order:
 
 1. Open DaVinci Resolve with a project.
 2. Run doctor and read the **Direct attach to Resolve** line.
-3. If it says the library loads but Resolve did not answer, check **Preferences > System > General > External scripting using**. For external scripting, **Local** is the normal setting. Resolve Free users can use the Console worker without enabling external access.
-4. If direct attach is unavailable on your build, use **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**.
+3. If it says the library loads but Resolve did not answer, check **Preferences > System > General > External scripting using**. For external scripting, **Local** is the normal setting. Resolve Free users should use Start AI Bridge without enabling external access.
+4. If direct attach is unavailable on your build, use **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**. It starts the worker directly; no paste is normally needed. Confirm with `resolve_status`.
 5. If that menu is missing, run the installer again and restart Resolve once. Resolve only scans for new menu scripts while it starts up.
 6. As a last resort, paste the line in `~/.resolve-ai-bridge/console-command.txt` into **Workspace > Console** with the **Py3** tab selected.
 
@@ -48,7 +48,11 @@ The downloaded repository folder may be renamed. Do not rename the installed fil
 
 ## Resolve Becomes Unresponsive
 
-The worker starts a daemon thread and returns control immediately. If the Console stays busy, restart Resolve and confirm the installed file is the current `ResolveConsole.py`. Do not paste an older agent that ends in a blocking polling loop.
+The Console fallback starts a daemon worker and returns after a startup handshake capped at one second. The menu launcher instead keeps Resolve's separate `fuscript` process alive while it serves the same queue; that menu script may appear busy, but the editing UI remains usable. Choose **Stop AI Bridge** to stop either route. Stop takes effect after the current operation; it is not cancellation of an active edit. Closing Resolve ends its menu worker.
+
+The launcher uses Resolve's injected API object, not a new external scripting connection or UIManager. On macOS Free 21.0.3.7, simply returning from a menu script kills its background worker. Also, printing from a worker thread can raise `PyCapsule_GetPointer` / `SystemError` on this build; the updated worker prints startup messages on the invoking thread. Reinstall the updated runtime and menu files if you still see the old clipboard instructions.
+
+A duplicate start is refused using an OS lock at `~/.resolve-ai-bridge.worker-lock`; **do not delete this lock file** while a worker or installer is running. The OS releases the lock when its process exits, including after a crash. A new worker can replace a dead updated worker's stale heartbeat. Older workers without this lock must be stopped before upgrading. A sibling `.install-lock` prevents startup during an update.
 
 ## Console Worker Reports Stale
 
@@ -56,7 +60,7 @@ The MCP process treats the worker as offline when `agent.json` is missing or old
 
 1. Keep Resolve open.
 2. Run **Bridge Status** from the Workspace > Scripts menu.
-3. Run **Start AI Bridge** again. A running worker prints its summary without starting a second one.
+3. Run **Start AI Bridge** again. It reports an existing worker rather than starting a second one. A held lock can also mean an unresponsive/busy worker; inspect status and logs before restarting Resolve.
 4. Run doctor again.
 
 ## Token Mismatch or Authentication

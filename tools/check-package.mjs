@@ -12,7 +12,7 @@ const directory = mkdtempSync(join(tmpdir(), 'resolve-package-'));
 try {
   const [packed] = JSON.parse(execFileSync(npm, ['pack', '--json', '--ignore-scripts', '--pack-destination', directory], { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' }));
   const files = new Set(packed.files.map(file => file.path));
-  for (const required of ['requirements.txt', 'install.py', 'bridge/operations.py', 'bridge/server.py', 'bin/cli.js', 'agent/ResolveConsole.py']) {
+  for (const required of ['requirements.txt', 'install.py', 'bridge/operations.py', 'bridge/server.py', 'bin/cli.js', 'agent/ResolveConsole.py', 'bridge/lifecycle.py', 'agent/menu/Start AI Bridge.py', 'agent/menu/Stop AI Bridge.py', 'agent/menu/Bridge Status.py']) {
     if (!files.has(required)) throw new Error(`Missing required npm file: ${required}`);
   }
   if (files.has('dist/index.html') || Object.keys(packageJson.dependencies || {}).length) throw new Error('Website assets/dependencies leaked into CLI package.');
