@@ -1,4 +1,4 @@
-# DaVinci Resolve AI Bridge
+# DaVinci Resolve AI Bridge MCP
 
 <img width="768" alt="Resolve AI Bridge demo" src="https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/assets/demo.gif" />
 
@@ -20,26 +20,29 @@ Inspect a timeline, place media, animate a zoom, adjust color, or try an edit on
 
 > ⭐ Finding it useful? Give the bridge a star—it helps other editors find it.
 
+---
+
 ## Quick setup
 
-You'll need **Python 3.10+** ([download](https://www.python.org/downloads/)). If you have Node/npm, run:
+You'll need **Python 3.10+** ([download](https://www.python.org/downloads/)).
+
+### Option A: Run directly with npx (Recommended for Node / npm users)
 
 ```bash
 npx davinci-resolve-ai-bridge-mcp
 ```
 
-The installer sets up `~/.resolve-ai-bridge`, a private Python environment, the Resolve menu entries, editing skills, and detected supported AI clients. Valid client configs are backed up and merged; invalid configs are left unchanged with a diagnostic. Antigravity and other clients can use the generated `mcp-config.json` manually.
+### Option B: One-line shell install
 
-<details>
-<summary>Other install options — macOS, Windows, Linux, or a downloaded repo</summary>
+**macOS / Linux** (run in Terminal):
 
 ```bash
-# macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/install.sh | bash
 ```
 
+**Windows** (run in PowerShell):
+
 ```powershell
-# Windows PowerShell
 irm https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/install.ps1 | iex
 ```
 
@@ -47,10 +50,12 @@ From a downloaded/cloned repository, run `python3 install.py --with-ffmpeg` (Win
 
 Node/npm is only needed for the npm installer and optional website/motion-graphics development.
 
-</details>
+The installer sets up `~/.resolve-ai-bridge`, a private Python environment, the Resolve menu entries, editing skills, and detected supported AI clients. Valid client configs are backed up and merged; invalid configs are left unchanged with a diagnostic. Antigravity and other clients can use the generated `mcp-config.json` manually.
+
+<br>
 
 <details>
-<summary>Optional: add FFmpeg for source frames and audio</summary>
+<summary><b>Optional: add FFmpeg for source frames and audio</b></summary>
 
 For Free-compatible source frame capture and efficient audio decoding, also install the optional private FFmpeg binary:
 
@@ -61,6 +66,8 @@ npx davinci-resolve-ai-bridge-mcp --with-ffmpeg
 This optional download stays in the bridge's private Python environment. It is not a Studio dependency. An existing `ffmpeg` on PATH also works; macOS `afconvert` supports audio extraction without FFmpeg.
 
 </details>
+
+---
 
 ## Connect to Resolve
 
@@ -73,6 +80,8 @@ This optional download stays in the bridge's private Python environment. It is n
 If the menu is missing after installation, quit and reopen Resolve once. Refresh/restart your AI client's MCP server after setup or a tool-schema update.
 
 Menu startup is live-tested on **macOS / Resolve Free 21.0.3.7 / Python 3.14.6**. Windows, Linux, and other builds still need live verification; the Console fallback stays available.
+
+<br>
 
 <details>
 <summary>Console fallback and startup details</summary>
@@ -89,12 +98,16 @@ Resolve may keep the menu script marked busy while its separate `fuscript` proce
 
 </details>
 
+<br>
+
 <details>
 <summary>Studio: connect automatically with external scripting</summary>
 
 Studio can use the same menu workflow. To allow direct attach, set **Preferences → System → General → External scripting using → Local**. When external scripting is available, the bridge connects directly. It probes that connection in a disposable process and uses the Console transport when direct attach is unavailable.
 
 </details>
+
+---
 
 ## What you can do
 
@@ -106,6 +119,8 @@ Studio can use the same menu workflow. To allow direct attach, set **Preferences
 | Work with color | Read and adjust supported grades, animate saturation, and add color shifts. |
 | Review before committing | Try edits on duplicate timelines, compare structure, and mark candidate silence cuts. |
 | Check source media | View source frames and analyze source audio levels, silence, and timing. |
+
+<br>
 
 <details>
 <summary>Full MCP tool list</summary>
@@ -133,15 +148,21 @@ Studio can use the same menu workflow. To allow direct attach, set **Preferences
 
 </details>
 
+<br>
+
 ### Motion graphics with Remotion
 
 For custom typography, lower thirds, or animated callouts, your AI can create a Remotion video and import it with `append_media`. Remotion is a separate, optional toolchain; it isn't bundled into the bridge's Python runtime.
 
 [Motion graphics workflows](docs/REMOTION.md) · [Editing recipes](docs/RECIPES.md)
 
+---
+
 ## A few things to know
 
 **Free support doesn't unlock Studio features.** Source frames exclude timeline effects, and source audio isn't the Fairlight mix. Some edits have limits: splits rebuild clips, title text is best effort, and silence cuts are restricted to supported clip layouts.
+
+<br>
 
 <details>
 <summary>Editing workflow, clip IDs, and frame/timecode rules</summary>
@@ -156,6 +177,8 @@ All public `frame` inputs and clip start/end positions use **absolute timeline f
 
 </details>
 
+<br>
+
 <details>
 <summary>Tool compatibility and limitations</summary>
 
@@ -169,9 +192,13 @@ All public `frame` inputs and clip start/end positions use **absolute timeline f
 
 </details>
 
+---
+
 ## Connect your AI client
 
 Most setup is handled by the installer. For manual configuration, use the absolute-path entry in `~/.resolve-ai-bridge/mcp-config.json`. No token needs to be typed into your client; the server and worker share a local token file automatically.
+
+<br>
 
 <details>
 <summary>Codex / ChatGPT desktop setup</summary>
@@ -202,6 +229,8 @@ For lengthy source analysis, the optional Codex server setting `tool_timeout_sec
 
 </details>
 
+<br>
+
 <details>
 <summary>Other clients, npm server mode, and generated commands</summary>
 
@@ -226,6 +255,8 @@ No token is needed in the client configuration. The server and Console worker sh
 
 </details>
 
+---
+
 ## Troubleshooting & updates
 
 If the bridge is offline, open a project and choose **Start AI Bridge**. Run the doctor from the repository for a connection check:
@@ -239,6 +270,8 @@ Use `python3 tools/doctor.py --offline` for file checks without contacting Resol
 Before an update, stop the worker and your MCP clients. The installer validates the replacement before activating it and keeps the previous runtime for recovery.
 
 [Troubleshooting](docs/TROUBLESHOOTING.md) · [Testing](docs/TESTING.md) · [Release notes](RELEASE_NOTES.md)
+
+<br>
 
 <details>
 <summary>Request safety, timeouts, and update recovery</summary>
@@ -254,6 +287,8 @@ Direct attach falls back to Console only before dispatch. Unexpected exceptions 
 Before updating, stop the Console worker and MCP clients. The installer builds and validates a staged runtime and dependencies before activation, retains the old directory at `~/.resolve-ai-bridge.previous`, and restores it on a caught activation failure. A hard interruption can leave a sibling `.install-lock` and `.stage-*` directory; see troubleshooting for recovery. Configuration/menu registration follows activation and is not one transaction with it. Run `python3 tools/doctor.py --offline` for file diagnostics without contacting Resolve.
 
 </details>
+
+<br>
 
 <details>
 <summary>Development and verification</summary>
@@ -275,6 +310,8 @@ npm run build
 The package check creates and inspects a temporary npm tarball; it does not publish. CI tests Python on macOS, Windows and Linux and checks website/package builds. Maintainers: see [release instructions](docs/RELEASING.md).
 
 </details>
+
+---
 
 ## License
 
