@@ -1,6 +1,8 @@
 # Release Notes
 
-## Unreleased — Fix one-line installation
+## v1.12.1 — Fix one-line installers (2026-10-04)
+
+Fixes the one-line installers stopping after downloading the repository. Rerun the current install command; no manual folder rename is needed.
 
 - Fix PowerShell and macOS/Linux downloads to use the current `davinci-resolve-ai-bridge-mcp` repository.
 - Find the extracted project by its `install.py` file instead of assuming the archive's folder name. Reject missing or ambiguous project folders with a clear error.
@@ -8,6 +10,7 @@
 - Handle spaces and brackets in PowerShell archive/temporary paths, including cleanup.
 - Stop the Bash installer when a download fails, even if its extraction pipeline succeeds.
 - Add isolated installer regression tests and document how to confirm installation finished.
+- Exclude Python cache files from npm packages automatically, and reject them during package checks.
 
 Validation: 83 tests passed with PowerShell 7.6.6 on macOS, including the new bootstrap regressions. Both installers downloaded/extracted the real GitHub archive and ran `install.py --help` without installing anything. The website build, npm tarball check, and offline doctor passed (doctor: zero failures, stopped-worker warning).
 

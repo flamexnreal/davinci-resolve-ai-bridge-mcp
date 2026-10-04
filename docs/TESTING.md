@@ -11,7 +11,7 @@ npm run build
 python3 tools/doctor.py
 ```
 
-The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets.
+The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets and Python cache files. Per-folder `.npmignore` rules keep caches out even after running tests.
 
 The doctor is a separate installed-runtime diagnostic. It can make a read-only status round trip to Resolve. A missing/stopped Console worker is a runtime warning, not proof of a code failure.
 

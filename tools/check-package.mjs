@@ -16,6 +16,9 @@ try {
     if (!files.has(required)) throw new Error(`Missing required npm file: ${required}`);
   }
   if (files.has('dist/index.html') || Object.keys(packageJson.dependencies || {}).length) throw new Error('Website assets/dependencies leaked into CLI package.');
+  for (const file of files) {
+    if (file.split('/').includes('__pycache__') || /\.py[cod]$/.test(file)) throw new Error(`Python cache leaked into npm package: ${file}`);
+  }
   // Read the manifest from the real archive too; listing alone can hide stale payloads.
   const manifest = JSON.parse(execFileSync('tar', ['-xOf', join(directory, packed.filename), 'package/package.json'], { encoding: 'utf8' }));
   if (manifest.version !== packageJson.version) throw new Error('Packed version mismatch.');
