@@ -2,6 +2,14 @@
 
 Run `python3 tools/doctor.py` on macOS or `py tools/doctor.py` on Windows before changing files. With Resolve open it reports which transport is live and round-trips a real request.
 
+## The One-Line Installer Downloads but Stops
+
+Older shell installers expected the repository's previous folder name. Rerun the current [one-line install command](../README.md#option-b-one-line-shell-install); it now finds the extracted project by its `install.py` file. Download progress alone does not mean installation finished—wait for **INSTALL COMPLETE**.
+
+On Windows, install **Python 3.10+**, reopen PowerShell, and retry. You can also double-click `install-windows.bat` in a complete downloaded project folder. Keeping that folder on D: is fine; the installer puts the menu scripts in Resolve's per-user script folder. After setup, fully quit and reopen Resolve and check **Workspace > Scripts > Resolve AI Bridge**, including **Utility**.
+
+If setup still fails, share the final installer error and your Resolve version. Do not include your token or private client configuration.
+
 ## My AI Says The Bridge Is Offline
 
 In this order:

@@ -15,6 +15,12 @@ The standard-library unit tests use in-memory Resolve API doubles and synthetic 
 
 The doctor is a separate installed-runtime diagnostic. It can make a read-only status round trip to Resolve. A missing/stopped Console worker is a runtime warning, not proof of a code failure.
 
+## Shell installer regressions
+
+`tests/test_bootstrap.py` runs the actual `install.ps1` and `install.sh` against temporary ZIP/tar fixtures and a harmless Python installer. It covers the current archive folder name, renamed folders, Python/downloader fallbacks, argument forwarding, invalid archives, failed downloads, nonzero installer exits, and temporary-file cleanup. PowerShell also checks the documented `Invoke-Expression` route and restores the caller's working folder. Downloads are mocked; extraction and Python execution are real. No Resolve files or client settings are changed.
+
+These tests run with the full unittest suite. PowerShell cases run when `pwsh` or Windows PowerShell is available; otherwise they skip. To use a temporary PowerShell executable, set `RESOLVE_BRIDGE_TEST_POWERSHELL` to its absolute path. POSIX Bash cases skip on Windows. PowerShell is a test tool, not an added bridge dependency. These checks do not substitute for a live Windows/Resolve installation test.
+
 ## Manual Resolve Free integration checklist
 
 Use a disposable project/timeline with short media. Start the Console worker, then refresh your MCP client. Do not use valuable edits for first-run integration testing.

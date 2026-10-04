@@ -52,6 +52,8 @@ Node/npm is only needed for the npm installer and optional website/motion-graphi
 
 The installer sets up `~/.resolve-ai-bridge`, a private Python environment, the Resolve menu entries, editing skills, and detected supported AI clients. Valid client configs are backed up and merged; invalid configs are left unchanged with a diagnostic. Antigravity and other clients can use the generated `mcp-config.json` manually.
 
+Wait for **INSTALL COMPLETE**, then reopen Resolve. If setup stops after downloading, see [installer troubleshooting](docs/TROUBLESHOOTING.md#the-one-line-installer-downloads-but-stops).
+
 <br>
 
 <details>

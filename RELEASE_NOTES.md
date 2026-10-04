@@ -1,5 +1,18 @@
 # Release Notes
 
+## Unreleased — Fix one-line installation
+
+- Fix PowerShell and macOS/Linux downloads to use the current `davinci-resolve-ai-bridge-mcp` repository.
+- Find the extracted project by its `install.py` file instead of assuming the archive's folder name. Reject missing or ambiguous project folders with a clear error.
+- Report a failed Python installation in PowerShell and restore the caller's working folder after success or failure. Use basic web parsing for Windows PowerShell compatibility.
+- Handle spaces and brackets in PowerShell archive/temporary paths, including cleanup.
+- Stop the Bash installer when a download fails, even if its extraction pipeline succeeds.
+- Add isolated installer regression tests and document how to confirm installation finished.
+
+Validation: 83 tests passed with PowerShell 7.6.6 on macOS, including the new bootstrap regressions. Both installers downloaded/extracted the real GitHub archive and ran `install.py --help` without installing anything. The website build, npm tarball check, and offline doctor passed (doctor: zero failures, stopped-worker warning).
+
+The bridge's Resolve tools, Free/Studio access, and runtime dependencies are unchanged. A live Windows/Resolve installation has not been tested here.
+
 ## v1.12.0 — One-click startup in Resolve Free (2026-09-06)
 
 This release brings 1-click startup to DaVinci Resolve Free directly from the Workspace menu, prevents background crashes during startup, and adds clean process locking and shutdown controls.
