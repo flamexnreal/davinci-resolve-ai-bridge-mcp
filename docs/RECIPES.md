@@ -29,7 +29,7 @@ Inspect the timeline and find the image on V2. Set its opacity to 40, then read 
 ## Push In On A Clip Over Time
 
 ```text
-Inspect the timeline. Take the clip under the playhead and animate its zoom from 100 percent to 125 percent over the clip's first two seconds using animate_zoom. Report keyframes_created from the reply: if it is false, tell me a static zoom was applied instead and why, and do not claim the move is animated.
+Inspect the timeline. Take the clip under the playhead and animate its zoom from 100 percent to 125 percent over the clip's first two seconds using animate_zoom. Report keyframes_created and keyframes_verified from the reply: if keyframes_created is false, tell me a static zoom was applied instead and why, and do not claim the move is animated. Then call inspect_fusion and confirm the clip's other Fusion nodes are still connected.
 ```
 
 ## Cut A Clip At The Playhead
@@ -60,6 +60,12 @@ Inspect the timeline and find the clip I describe. If its name is ambiguous, sho
 
 ```text
 Inspect the project and current timeline. Call list_render_presets and tell me which existing preset you plan to use and the output directory. Wait for approval. Add the render job but do not start rendering unless I separately approve it.
+```
+
+## Follow a Render
+
+```text
+I approve starting the queued render. Start it, then call render_status every so often and tell me the percentage. When it finishes, report the status and the output file. If it fails, quote the error.
 ```
 
 ## Better Editing Brief

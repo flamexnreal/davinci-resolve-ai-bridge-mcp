@@ -14,7 +14,6 @@ import hashlib
 import hmac
 import json
 import os
-import secrets
 import shlex
 import subprocess
 import sys
@@ -92,17 +91,18 @@ def _read_json(path):
 
 
 def _load_token():
-    if TOKEN_FILE.exists():
-        value = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if value:
-            return value
-    value = "rab_" + secrets.token_urlsafe(32)
-    TOKEN_FILE.write_text(value + "\n", encoding="utf-8")
-    try:
-        os.chmod(str(TOKEN_FILE), 0o600)
-    except OSError:
-        pass
-    return value
+    return lifecycle.load_token(TOKEN_FILE)
+
+
+def _queued(inbox):
+    """Requests oldest first. Ids are random, so their names carry no order."""
+    entries = []
+    for path in inbox.glob("*.json"):
+        try:
+            entries.append((path.stat().st_mtime, path.name, path))
+        except OSError:  # Withdrawn by a client that timed out.
+            pass
+    return [path for _, _, path in sorted(entries)]
 
 
 def _injected(name, namespace=None):
@@ -346,6 +346,7 @@ class ResolveRuntime:
             self.reporter.start()
             self.ready.set()
             refreshed = 0.0
+            pruned = 0.0
             while not self.stop_event.wait(0.08):
                 if lifecycle.consume_stop(HOME, self.session, self.token):
                     self.stop_event.set()
@@ -357,7 +358,13 @@ class ResolveRuntime:
                         self._refresh_snapshot()
                     except Exception as exc:
                         self.log("Heartbeat failed: %s" % exc)
-                for path in sorted(INBOX.glob("*.json"))[:8]:
+                if now - pruned >= 600:
+                    pruned = now
+                    try:
+                        lifecycle.prune_runtime(HOME, now)
+                    except Exception as exc:
+                        self.log("Cleanup failed: %s" % exc)
+                for path in _queued(INBOX)[:8]:
                     if lifecycle.consume_stop(HOME, self.session, self.token):
                         self.stop_event.set()
                     if self.stop_event.is_set():

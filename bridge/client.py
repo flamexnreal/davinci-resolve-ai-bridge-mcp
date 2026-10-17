@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+from bridge import lifecycle
 from bridge.operations import QUEUE_READ_ONLY
 
 
@@ -45,25 +46,11 @@ def _token():
     value = os.environ.get("RESOLVE_AI_BRIDGE_TOKEN", "").strip()
     if value:
         return value
-    if TOKEN_FILE.exists():
-        try:
-            token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-            if token:
-                return token
-        except OSError:
-            pass
-    # Self-heal / auto-generate shared local token with strict 0600 permissions
-    _ensure_dirs()
-    token = "rab_" + secrets.token_urlsafe(32)
     try:
-        TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
-        try:
-            os.chmod(str(TOKEN_FILE), 0o600)
-        except OSError:
-            pass
+        return lifecycle.load_token(TOKEN_FILE)
     except OSError:
-        pass
-    return token
+        # Unwritable home: direct attach still works; the queue will report a mismatch.
+        return "rab_" + secrets.token_urlsafe(32)
 
 
 def _read_json(path):
@@ -96,7 +83,12 @@ def heartbeat(max_age=25.0):
         data = _read_json(HEARTBEAT_FILE)
     except (OSError, ValueError, TypeError):
         return None
-    age = time.time() - float(data.get("time", 0))
+    if not isinstance(data, dict):
+        return None
+    try:
+        age = time.time() - float(data.get("time", 0))
+    except (TypeError, ValueError):
+        return None
     if age > max_age or age < -10:
         return None
     data["heartbeat_age_seconds"] = round(max(0.0, age), 2)

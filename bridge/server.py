@@ -17,18 +17,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mcp.server.fastmcp import FastMCP
-from mcp.types import TextContent, ImageContent
-
 from bridge import client, transport
 from bridge.operations import AGENT_VERSION
+
+try:
+    from mcp.server.fastmcp import FastMCP as _MCPServer
+    _SERVER_KWARGS: dict[str, Any] = {}
+except ImportError:  # mcp 2.x renamed FastMCP to MCPServer; the installer still pins 1.x.
+    from mcp.server.mcpserver import MCPServer as _MCPServer
+    _SERVER_KWARGS = {"version": AGENT_VERSION}
+from mcp.types import TextContent, ImageContent
 
 # Ensure local runtime folders and token exist immediately
 client._ensure_dirs()
 client._token()
 
 
-mcp = FastMCP(
+mcp = _MCPServer(
     "Resolve AI Bridge",
     instructions=(
         "Inspect before editing. Call resolve_status, then timeline_overview. "
@@ -37,8 +42,11 @@ mcp = FastMCP(
         "to position them, animate_zoom for a scale that moves over time, "
         "split_clip to cut a clip in two, create_compound_clip to group clips into "
         "a compound container, and change_clip_speed for slow motion or speed changes. "
+        "Fusion effects (zoom, blur, spotlight, saturation, color fx) share one chain before MediaOut; "
+        "check it with inspect_fusion. After starting a render, follow it with render_status. "
         "Never delete clips or start a render without explicit user approval."
     ),
+    **_SERVER_KWARGS,
 )
 
 try:  # Report our own version in the MCP handshake instead of the SDK's.
@@ -65,6 +73,15 @@ def _result(operation: str, params: Optional[dict[str, Any]] = None, timeout: fl
             ensure_ascii=True,
             indent=2,
         )
+
+
+def _frames(params: dict[str, Any], end_frame: Optional[int], timeline_start_frame: Optional[int],
+            timeline_end_frame: Optional[int]) -> None:
+    """Add the optional effect frame arguments that were supplied."""
+    for key, value in (("end_frame", end_frame), ("timeline_start_frame", timeline_start_frame),
+                       ("timeline_end_frame", timeline_end_frame)):
+        if value is not None:
+            params[key] = value
 
 
 # --------------------------------------------------------------- inspection
@@ -479,6 +496,8 @@ def animate_zoom(
     keyframes: Optional[list[dict[str, Any]]] = None,
     reset: bool = False,
     track_index: Optional[int] = None,
+    timeline_start_frame: Optional[int] = None,
+    timeline_end_frame: Optional[int] = None,
 ) -> str:
     """Animate a clip's scale and framing over time (smooth zooms, punch-ins, rebounds, pull-outs, multi-keyframe paths).
 
@@ -486,6 +505,10 @@ def animate_zoom(
     (`linear`, `ease_in`, `cubic_in`, `ease_out`, `cubic_out`, `ease`, `cubic_ease`,
     `circular_ease`, `rebound_in`, `rebound_out`, `elastic_out`), multi-keyframe arrays,
     and automated AI presets (`punch_in`, `pop_in`, `slow_push`, `dramatic`, `reveal`, `cinematic`).
+    Joins the bridge's Fusion chain: blur, spotlight and your own Fusion nodes stay connected.
+    reset=True removes only the bridge zoom node.
+    Frames: start_frame/end_frame and keyframe 'frame' count from the clip's first frame (0).
+    timeline_start_frame/timeline_end_frame and keyframe 'timeline_frame' take absolute timeline frames.
     """
     params: dict[str, Any] = {
         "item_id": item_id,
@@ -503,8 +526,7 @@ def animate_zoom(
         params["start_zoom"] = start_zoom
     if end_zoom is not None:
         params["end_zoom"] = end_zoom
-    if end_frame is not None:
-        params["end_frame"] = end_frame
+    _frames(params, end_frame, timeline_start_frame, timeline_end_frame)
     if track_index is not None:
         params["track_index"] = track_index
     return _result("animate_zoom", params, timeout=60.0)
@@ -675,17 +697,27 @@ def keyframe_clip_saturation(
     end_saturation: float = 0.0,
     start_frame: int = 0,
     end_frame: Optional[int] = None,
+    easing: str = "linear",
+    reset: bool = False,
+    timeline_start_frame: Optional[int] = None,
+    timeline_end_frame: Optional[int] = None,
 ) -> str:
-    """Animate a gradual color transition (e.g. from 1.0 full color to 0.0 black and white) across frames via Fusion BezierSpline on the clip."""
+    """Animate saturation (e.g. 1.0 full color to 0.0 black and white) with a bridge-owned Fusion node.
+
+    Your own ColorCorrector/BrightnessContrast nodes are never changed. reset=True removes the bridge node.
+    Frames: start_frame/end_frame and keyframe 'frame' count from the clip's first frame (0).
+    timeline_start_frame/timeline_end_frame and keyframe 'timeline_frame' take absolute timeline frames.
+    """
     params: dict[str, Any] = {
         "item_id": item_id,
         "start_saturation": start_saturation,
         "end_saturation": end_saturation,
         "start_frame": start_frame,
+        "easing": easing,
+        "reset": reset,
     }
-    if end_frame is not None:
-        params["end_frame"] = end_frame
-    return _result("keyframe_clip_saturation", params)
+    _frames(params, end_frame, timeline_start_frame, timeline_end_frame)
+    return _result("keyframe_clip_saturation", params, timeout=60.0)
 
 
 @mcp.tool()
@@ -700,8 +732,16 @@ def animate_color_fx(
     saturation: float = 1.3,
     start_frame: int = 0,
     end_frame: Optional[int] = None,
+    reset: bool = False,
+    timeline_start_frame: Optional[int] = None,
+    timeline_end_frame: Optional[int] = None,
 ) -> str:
-    """Animate dynamic color effects (rainbow hue rotation and subtle organic luminance flicker) over time via Fusion on a clip."""
+    """Animate rainbow hue rotation and a subtle luminance flicker with a bridge-owned Fusion ColorCorrector.
+
+    Reports any part this build's ColorCorrector cannot do. reset=True removes the bridge node.
+    Frames: start_frame/end_frame and keyframe 'frame' count from the clip's first frame (0).
+    timeline_start_frame/timeline_end_frame and keyframe 'timeline_frame' take absolute timeline frames.
+    """
     params: dict[str, Any] = {
         "item_id": item_id,
         "rainbow": rainbow_cycles if rainbow else 0.0,
@@ -710,10 +750,10 @@ def animate_color_fx(
         "flicker_frequency": flicker_frequency,
         "saturation": saturation,
         "start_frame": start_frame,
+        "reset": reset,
     }
-    if end_frame is not None:
-        params["end_frame"] = end_frame
-    return _result("animate_color_fx", params)
+    _frames(params, end_frame, timeline_start_frame, timeline_end_frame)
+    return _result("animate_color_fx", params, timeout=60.0)
 
 
 @mcp.tool()
@@ -737,8 +777,18 @@ def apply_blur_effect(
     easing: str = "smootherstep",
     reset: bool = False,
     track_index: Optional[int] = None,
+    keyframes: Optional[list[dict[str, Any]]] = None,
+    timeline_start_frame: Optional[int] = None,
+    timeline_end_frame: Optional[int] = None,
 ) -> str:
-    """Apply a static or dynamic (gradual) blur effect to a full frame or masked bounding region on a timeline clip."""
+    """Apply a static or gradual blur to the full frame or a masked region (gaussian, defocus, directional).
+
+    Each mask_name is its own blur; reusing a name updates it. Keyframes may set frame, blur_size,
+    center_x, center_y, width, height and easing. Joins the bridge's Fusion chain without cutting out
+    your own nodes. reset=True removes every bridge blur and leaves other nodes connected.
+    Frames: start_frame/end_frame and keyframe 'frame' count from the clip's first frame (0).
+    timeline_start_frame/timeline_end_frame and keyframe 'timeline_frame' take absolute timeline frames.
+    """
     params: dict[str, Any] = {
         "item_id": item_id,
         "blur_type": blur_type,
@@ -758,11 +808,12 @@ def apply_blur_effect(
         "easing": easing,
         "reset": reset,
     }
-    if end_frame is not None:
-        params["end_frame"] = end_frame
+    if keyframes is not None:
+        params["keyframes"] = keyframes
+    _frames(params, end_frame, timeline_start_frame, timeline_end_frame)
     if track_index is not None:
         params["track_index"] = track_index
-    return _result("apply_blur_effect", params)
+    return _result("apply_blur_effect", params, timeout=60.0)
 
 
 @mcp.tool()
@@ -788,8 +839,15 @@ def apply_spotlight_mask(
     easing: str = "cubic_out",
     reset: bool = False,
     track_index: Optional[int] = None,
+    timeline_start_frame: Optional[int] = None,
+    timeline_end_frame: Optional[int] = None,
 ) -> str:
-    """Apply a dynamic or static spotlight reveal mask with adjustable feathering, ambient darkness, and animated sweep keyframes."""
+    """Apply a static or animated spotlight: dim everything outside a soft mask, with sweep keyframes.
+
+    Joins the bridge's Fusion chain without cutting out your own nodes. reset=True removes every bridge spotlight.
+    Frames: start_frame/end_frame and keyframe 'frame' count from the clip's first frame (0).
+    timeline_start_frame/timeline_end_frame and keyframe 'timeline_frame' take absolute timeline frames.
+    """
     params: dict[str, Any] = {
         "item_id": item_id,
         "center_x": center_x,
@@ -814,11 +872,22 @@ def apply_spotlight_mask(
         params["height"] = height
     if keyframes is not None:
         params["keyframes"] = keyframes
-    if end_frame is not None:
-        params["end_frame"] = end_frame
+    _frames(params, end_frame, timeline_start_frame, timeline_end_frame)
     if track_index is not None:
         params["track_index"] = track_index
-    return _result("apply_spotlight_mask", params)
+    return _result("apply_spotlight_mask", params, timeout=60.0)
+
+
+@mcp.tool()
+def inspect_fusion(item_id: str = "playhead", track_index: Optional[int] = None) -> str:
+    """Read-only: list a clip's Fusion nodes, their connections, and the bridge effect chain before MediaOut.
+
+    Use after a Fusion effect to confirm what is connected. Never creates or changes a composition.
+    """
+    params: dict[str, Any] = {"item_id": item_id}
+    if track_index is not None:
+        params["track_index"] = track_index
+    return _result("inspect_fusion", params)
 
 
 @mcp.tool()
@@ -866,6 +935,15 @@ def render_current_timeline(
         {"output_dir": output_dir, "name": name, "preset": preset, "start": start},
         timeout=180.0,
     )
+
+
+@mcp.tool()
+def render_status(job_id: str = "") -> str:
+    """Report render progress: whether Resolve is rendering, and each job's status, percent and errors.
+
+    Pass the job_id from render_current_timeline, or leave it empty for every job in the queue.
+    """
+    return _result("render_status", {"job_id": job_id})
 
 
 @mcp.resource("resolve://guide")

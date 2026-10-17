@@ -1,5 +1,41 @@
 # Release Notes
 
+## v1.13.0 — Stackable Fusion effects, render progress and Free checks (2026-10-17)
+
+Fusion effects now work together instead of replacing each other, renders can be followed to the end, and `project_health` warns before Resolve Free hits its delivery limits. No Studio-only features were added.
+
+### Fixed
+- **Fusion effects no longer cut each other out.** Zoom, blur, spotlight, saturation and color fx each rewired the clip as MediaIn → effect → MediaOut, so a new effect dropped the previous one and any Fusion nodes you had built. They now share one bridge-owned chain in front of MediaOut. Your own nodes stay connected, and earlier `AIBridge...` nodes are reconnected the next time any effect runs.
+- **Default blur now appears.** A blur with the default `mask_name` was created but never connected.
+- **Resets only remove bridge nodes.** Blur and spotlight resets no longer reconnect MediaIn straight to MediaOut, and no longer delete nodes named `FavoritesBlur` or `PrivacyBlur`. Zoom reset now removes the zoom node instead of leaving an identity transform.
+- **Saturation and color fx no longer edit your nodes.** They used whichever ColorCorrector or BrightnessContrast they found first, and saturation wrote to `ColorCorrector1` even after creating a BrightnessContrast, so it could do nothing while reporting success. Both now use their own tagged nodes.
+- **Honest Fusion results.** Each effect runs its Lua with a completion marker, reads a value back, and reports `verified` / `keyframes_verified` plus the resulting `fusion_chain`. Missing Fusion inputs are named instead of failing silently. A failed effect deletes the nodes it created and leaves MediaOut as it was. Debug output and the "Butter-smooth" note are gone.
+- **Blur types are checked.** Defocus, directional and mosaic blurs used the gaussian size control. Each type now uses a size control the node actually has, or fails with a clear message.
+- **`inspect_fusion` is read-only.** It could run arbitrary Lua and create a Fusion composition while being classed as read-only. Both are removed.
+- **Token file created safely.** It is now created owner-only (0600) from its first byte, and exactly once, so the MCP server and Resolve worker can't race to different tokens.
+- **Queue folders no longer grow forever.** The worker removes completed/failed request records after 7 days, unknown-outcome records after 30 days, and unread replies after an hour, and rotates its log at 1 MB. The installer keeps the newest 3 backups of each client config.
+- **Requests run in the order they were sent.** They were picked up in random ID order.
+- **Edits are read back.** `set_clip_property`, `set_clip_enabled` and `set_clip_color` compare what Resolve reports after the change.
+- **`install.sh` checks Python 3.10+ before downloading**, rather than after, and no longer accepts an older `python`.
+- **Shell installer tests pass on Linux.** The test PATH lacked `gzip`, which GNU tar needs.
+
+### Added
+- **`render_status`**: whether Resolve is rendering, and each job's status, percent, time remaining and error. Uses ordinary render calls that work in Free.
+- **`inspect_fusion` MCP tool**: lists a clip's Fusion nodes, their connections and the bridge effect chain.
+- **Free delivery checks in `project_health`**: on Resolve Free, warns when the timeline is above UHD (3840×2160) or 60 fps.
+- **Absolute frames for Fusion effects**: `timeline_start_frame`, `timeline_end_frame` and keyframe `timeline_frame`. `start_frame` / `end_frame` keep counting from the clip's first frame, and frames outside the clip are refused. Keyframes are placed relative to the comp's render start.
+- `apply_blur_effect` accepts `keyframes`; saturation takes `easing`; saturation and color fx take `reset`.
+- **`mcp` 2.x compatibility**: the server also starts with the renamed `MCPServer`. The installer still pins `mcp<2`.
+
+### Changed
+- Fusion animation scripts are about a quarter of their old size (a 300-frame zoom with a moving centre: 6.8 KB instead of 28.6 KB): per-frame values are sent as compact arrays. Every frame is still keyed, so curves look the same. The extra hold keys at frame 0 and at the clip's end are gone, because Fusion holds the first and last values anyway.
+- The README no longer claims hosted CI; none is configured. Run the checks locally.
+
+### Validation & limits
+- 111 automated tests pass with mcp 1.30.0 and with mcp 2.2.0 (Python 3.13, Linux). The new Fusion tests run every generated Lua script in LuaJIT 2.1 against a simulated comp (optional `lupa` package). The installer was run into a temporary home; the offline doctor reported zero failures (warnings: menu skipped, worker not running).
+- **Not tested against a live Resolve.** That includes the Fusion chain, keyframe timing relative to the comp's render start, blur-type size inputs, `render_status` and the read-back checks. Use the manual checklist in docs/TESTING.md on a disposable project.
+- PowerShell installer changes: none. Windows and macOS were not run for this release.
+
 ## v1.12.1 — Fix one-line installers (2026-10-04)
 
 Fixes the one-line installers stopping after downloading the repository. Rerun the current install command; no manual folder rename is needed.

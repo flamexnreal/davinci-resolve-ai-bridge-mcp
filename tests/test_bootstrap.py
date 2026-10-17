@@ -209,9 +209,15 @@ class ShellBootstrapTests(BootstrapFixture):
         bin_dir.mkdir(exist_ok=True)
         for entry in bin_dir.iterdir():
             entry.unlink()
-        for command_name in ("mktemp", "tar", "dirname", "rm"):
-            (bin_dir / command_name).symlink_to(shutil.which(command_name))
-        if command:
+        # GNU tar runs gzip itself for -z; BSD tar (macOS) has it built in.
+        for command_name in ("mktemp", "tar", "dirname", "rm", "gzip"):
+            if shutil.which(command_name):
+                (bin_dir / command_name).symlink_to(shutil.which(command_name))
+        if command == "old-python3":
+            old = bin_dir / "python3"
+            old.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")  # fails the 3.10 check
+            old.chmod(0o755)
+        elif command:
             (bin_dir / command).symlink_to(sys.executable)
         if downloader:
             executable = bin_dir / downloader
@@ -233,8 +239,10 @@ class ShellBootstrapTests(BootstrapFixture):
             [BASH, str(ROOT / "install.sh"), *INSTALL_ARGS],
             cwd=self.cwd, env=self.env, capture_output=True, text=True, timeout=30,
         )
-        if downloader:
+        if downloader and command in ("python3", "python"):
             self.assertEqual((self.root / "state.json").read_text(), ARCHIVE_URL + ".tar.gz")
+        elif not command or command == "old-python3":
+            self.assertFalse((self.root / "state.json").exists(), "downloaded before checking Python")
         self.assert_cleaned()
         return result
 
@@ -265,6 +273,12 @@ class ShellBootstrapTests(BootstrapFixture):
 
     def test_missing_python_is_reported(self):
         result = self.run_bootstrap(command=None)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Python 3.10 or newer is required", result.stderr)
+        self.assertFalse(self.record.exists())
+
+    def test_old_python_is_rejected_before_download(self):
+        result = self.run_bootstrap(command="old-python3")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Python 3.10 or newer is required", result.stderr)
         self.assertFalse(self.record.exists())
