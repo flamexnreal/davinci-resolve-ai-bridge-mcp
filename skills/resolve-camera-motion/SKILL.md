@@ -13,6 +13,8 @@ Use this skill whenever a request involves zooming, camera movement, punch-ins, 
 
 The `animate_zoom` tool builds native Fusion transform splines directly on the timeline clip. It supports single-range zooms, automated AI presets, and multi-waypoint keyframe arrays.
 
+Frames count from the clip's first frame (`0`). Pass `timeline_start_frame` / `timeline_end_frame`, or `timeline_frame` in a keyframe, to use absolute timeline frames. Keyframes must fall inside the clip. The zoom joins the bridge's Fusion chain, so blurs, spotlights and the user's own Fusion nodes stay connected; `reset=True` removes only the zoom.
+
 ### A. Single Range Zooms
 ```python
 # Punch in on clip V1.1 from 1.0x to 1.40x with cubic ease-out

@@ -3,9 +3,94 @@ import hmac
 import json
 import os
 from pathlib import Path
+import secrets
 import sys
 import time
 import uuid
+
+
+# Retention for files the queue leaves behind (seconds).
+OUTBOX_MAX_AGE = 3600           # unread replies: no client waits longer than a few minutes
+REQUEST_RECORD_MAX_AGE = 7 * 86400
+UNKNOWN_RECORD_MAX_AGE = 30 * 86400  # "running" records explain an unknown outcome; keep longer
+LOG_MAX_BYTES = 1024 * 1024
+
+
+def load_token(path):
+    """Return the shared queue token, creating it owner-only (0600) if it is missing.
+
+    O_EXCL makes exactly one process create the token, so the MCP server and the
+    Resolve worker can never start with different tokens.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(40):
+        try:
+            value = path.read_text(encoding="utf-8").strip()
+            if value:
+                return value
+        except FileNotFoundError:
+            token = "rab_" + secrets.token_urlsafe(32)
+            try:
+                fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                continue  # Another process won the race; read its token.
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(token + "\n")
+            return token
+        time.sleep(0.025)  # Empty: another process may still be writing it.
+    return replace_token(path)  # Still empty after a second.
+
+
+def replace_token(path):
+    """Write a new token atomically; the file is owner-only from its first byte."""
+    path = Path(path)
+    token = "rab_" + secrets.token_urlsafe(32)
+    temp = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+        os.replace(str(temp), str(path))
+    finally:
+        temp.unlink(missing_ok=True)
+    return token
+
+
+def prune_runtime(home, now=None):
+    """Delete stale queue leftovers and rotate the worker log. Returns the count removed."""
+    home = Path(home)
+    now = time.time() if now is None else now
+    removed = 0
+
+    def old(path, age):
+        try:
+            return now - path.stat().st_mtime > age
+        except OSError:
+            return False
+
+    for path in (home / "outbox").glob("*.json"):
+        if old(path, OUTBOX_MAX_AGE):
+            path.unlink(missing_ok=True)
+            removed += 1
+    for path in (home / "requests").glob("*.json"):
+        if not old(path, REQUEST_RECORD_MAX_AGE):
+            continue
+        try:
+            running = json.loads(path.read_text(encoding="utf-8")).get("state") == "running"
+        except (OSError, ValueError, AttributeError):
+            running = False
+        if running and not old(path, UNKNOWN_RECORD_MAX_AGE):
+            continue
+        path.unlink(missing_ok=True)
+        removed += 1
+    log = home / "logs" / "agent.log"
+    try:
+        if log.stat().st_size > LOG_MAX_BYTES:
+            os.replace(str(log), str(log.with_name("agent.log.1")))
+    except OSError:
+        pass
+    return removed
 
 
 class WorkerLock:

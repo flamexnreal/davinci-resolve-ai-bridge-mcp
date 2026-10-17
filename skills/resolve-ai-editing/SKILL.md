@@ -47,6 +47,13 @@ Use `animate_zoom` to generate native Fusion camera keyframes directly on timeli
 
 - **Spotlight Mask**: Use `apply_spotlight_mask` to darken the background (ambient brightness `0.0` for pure black shadow) and focus an animated, feathered spotlight circle/rectangle across key points on any timeline clip.
 
+## Fusion Effects Stack
+
+- Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain in front of MediaOut. They stack, and the user's own Fusion nodes stay connected. `reset=True` removes only that effect's bridge nodes.
+- Each `mask_name` is its own blur. Reuse the name to update it.
+- Effect frames (`start_frame`, `end_frame`, keyframe `frame`) count from the clip's first frame. Use `timeline_start_frame`, `timeline_end_frame` or keyframe `timeline_frame` for absolute timeline frames. Frames outside the clip are refused.
+- Check `verified` / `keyframes_verified` and `fusion_chain` in each reply, then confirm with `inspect_fusion`. A `null` value means the build would not report back, not success.
+
 ## Images And Overlays
 
 - Use `add_image` for any still. Do not use `append_media` for a picture; that produces a one-frame clip.
@@ -98,5 +105,6 @@ The public Resolve scripting API does not expose every action from the Edit page
 - timeline_audio uses per-channel peaks and channel energy. Check truncation and absolute timeline offsets; silence intervals use 50 ms windows and exclusive ends.
 - review_silence places markers only. Audition candidates and obtain user approval of the selected marker IDs before apply_silence_cuts. Application creates a duplicate and supports an isolated clip or aligned AV pair; complex timelines stay manual.
 - Stale markers are refused after timeline edits. Reanalyze rather than bypassing the check.
-- project_health reports active-timeline source/gap/disabled-track issues; gaps can be intentional. It does not inspect the full Fairlight mix or render settings.
+- project_health reports active-timeline source/gap/disabled-track issues; gaps can be intentional. On Resolve Free it also flags timelines above UHD or 60 fps, which Free cannot render. It does not inspect the full Fairlight mix or queued render settings.
+- After an approved render starts, follow it with render_status and report the final status and any error.
 - Run bridge_capabilities for API/decoder availability. Free uses the Console worker; no Studio AI feature should be substituted.

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.12.1"
+AGENT_VERSION = "1.13.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -115,12 +115,18 @@ READABLE_TRANSFORM_KEYS = (
 
 PAGES = ("media", "cut", "edit", "fusion", "color", "fairlight", "deliver")
 
+# Delivery ceilings of DaVinci Resolve (Free); Studio has none of these.
+FREE_MAX_LONG_EDGE = 3840
+FREE_MAX_SHORT_EDGE = 2160
+FREE_MAX_FPS = 60
+
 
 # Default unknown/new operations to mutations for queue context protection.
 QUEUE_READ_ONLY = frozenset({
     "status", "project_info", "list_timelines", "timeline_overview", "list_media",
     "get_clip_transform", "get_clip_grade", "inspect_fusion", "list_render_presets",
     "bridge_capabilities", "project_health", "compare_timelines", "timeline_audio",
+    "render_status",
 })
 
 
@@ -173,6 +179,390 @@ def transform_params_from_props(props):
         if name is not None:
             params[name] = value
     return params
+
+
+# ------------------------------------------------------------------ fusion
+#
+# Bridge Fusion effects share one segment directly in front of MediaOut:
+#
+#   <user chain or MediaIn> -> blur -> spotlight -> zoom -> saturation -> color_fx -> MediaOut
+#
+# Rebuilding the segment keeps whatever already feeds it, so user nodes and the
+# other bridge effects stay connected. Only nodes tagged as bridge-owned (or the
+# AIBridge* names earlier versions created) are moved or deleted.
+
+FUSION_OWNER = "resolve-ai-bridge.fusion.v1"
+FUSION_OWNER_KEY = "ResolveAIBridgeOwner"
+FUSION_STAGE_KEY = "ResolveAIBridgeStage"
+FUSION_ROLE_KEY = "ResolveAIBridgeRole"
+FUSION_LUA_KEY = "ResolveAIBridgeLua"
+FUSION_STAGE_ORDER = ("blur", "spotlight", "zoom", "saturation", "color_fx")
+# Names created before stages were tagged: prefix -> (stage kind, role).
+LEGACY_FUSION_PREFIXES = (
+    ("AIBridgeBlur_", "blur", "main"),
+    ("AIBridgeMask_", "blur", "mask"),
+    ("AIBridgeSpotlightBase_", "spotlight", "base"),
+    ("AIBridgeSpotlightGain_", "spotlight", "gain"),
+    ("AIBridgeSpotlightMerge_", "spotlight", "merge"),
+    ("AIBridgeSpotlightMask_", "spotlight", "mask"),
+)
+# Lua keeps per-function constant tables small; split long key lists.
+LUA_KEY_CHUNK = 2000
+LUA_KEYS_HELPER = ("local function aib_keys(set, first, values) "
+                   "for i = 1, #values do set(first + i - 1, values[i]) end end")
+
+
+def _lua_num(value):
+    value = float(value)
+    if not math.isfinite(value):
+        raise OperationError("Fusion values must be finite numbers.")
+    return "%.6g" % value
+
+
+def _fusion_name(tool):
+    try:
+        return str(tool.Name)
+    except Exception:
+        return str(call(tool, "GetAttrs", "", "TOOLS_Name") or "")
+
+
+def _fusion_tools(comp):
+    tools = call(comp, "GetToolList", None, False) or {}
+    return list(tools.values()) if isinstance(tools, dict) else list(tools)
+
+
+def _fusion_role(tool):
+    """Return (stage key, role) for a bridge-owned node, otherwise None."""
+    if call(tool, "GetData", None, FUSION_OWNER_KEY) == FUSION_OWNER:
+        stage = call(tool, "GetData", None, FUSION_STAGE_KEY)
+        role = call(tool, "GetData", None, FUSION_ROLE_KEY)
+        return (str(stage), str(role)) if stage and role and role != "retired" else None
+    name = _fusion_name(tool)
+    if name == "AIBridgeZoom":
+        return "zoom", "main"
+    for prefix, kind, role in LEGACY_FUSION_PREFIXES:
+        tag = name[len(prefix):]
+        if name.startswith(prefix) and tag.isalnum():
+            return "%s:%s" % (kind, tag), role
+    return None
+
+
+def _is_retired(tool):
+    return (call(tool, "GetData", None, FUSION_OWNER_KEY) == FUSION_OWNER
+            and call(tool, "GetData", None, FUSION_ROLE_KEY) == "retired")
+
+
+def _fusion_stages(comp):
+    stages = {}
+    for tool in _fusion_tools(comp):
+        owned = _fusion_role(tool)
+        if owned:
+            stages.setdefault(owned[0], {})[owned[1]] = tool
+    return stages
+
+
+def _stage_ports(nodes):
+    """Return ([(entry tool, input name or None for main)], output tool), or None if incomplete."""
+    if "merge" in nodes:
+        if "base" not in nodes:
+            return None
+        entries = [(nodes["base"], None)]
+        # Spotlights from earlier versions fed Foreground directly when gain was 1.
+        entries.append((nodes["gain"], None) if "gain" in nodes else (nodes["merge"], "Foreground"))
+        return entries, nodes["merge"]
+    if "main" in nodes:
+        return [(nodes["main"], None)], nodes["main"]
+    return None
+
+
+def _stage_sort_key(key):
+    kind, _, tag = key.partition(":")
+    order = FUSION_STAGE_ORDER.index(kind) if kind in FUSION_STAGE_ORDER else len(FUSION_STAGE_ORDER)
+    return order, tag
+
+
+def _fusion_endpoint(comp, kind):
+    tool = call(comp, "FindTool", None, kind + "1")
+    if tool is not None:
+        return tool
+    for candidate in _fusion_tools(comp):
+        if call(candidate, "GetAttrs", None, "TOOLS_RegID") == kind:
+            return candidate
+    return None
+
+
+def _main_source(tool):
+    main = call(tool, "FindMainInput", None, 1)
+    return call(main, "GetConnectedOutput", None) if main is not None else None
+
+
+def _fusion_walk(media_out, stages):
+    """Follow MediaOut upstream through bridge stages.
+
+    Returns (first non-bridge output, stage keys in downstream-first order).
+    """
+    by_output = {}
+    for key, nodes in stages.items():
+        ports = _stage_ports(nodes)
+        if ports:
+            by_output[_fusion_name(ports[1])] = (key, ports)
+    keys = []
+    output = _main_source(media_out)
+    for _ in range(1000):
+        if output is None:
+            break
+        tool = call(output, "GetTool", None)
+        hit = by_output.get(_fusion_name(tool)) if tool is not None else None
+        if hit is None:
+            if tool is not None and _is_retired(tool):
+                # A node being replaced in this edit: look through it.
+                output = _main_source(tool)
+                continue
+            break
+        if hit[0] in keys:
+            raise OperationError("The clip's Fusion chain loops through %s; inspect it on the Fusion page." % hit[0])
+        keys.append(hit[0])
+        output = _main_source(hit[1][0][0][0])
+    return output, keys
+
+
+def _upstream_names(output, limit=400):
+    """Names of every tool feeding ``output``, bounded for very large comps."""
+    names, pending = set(), [output]
+    while pending and len(names) < limit:
+        tool = call(pending.pop(), "GetTool", None)
+        if tool is None:
+            continue
+        name = _fusion_name(tool)
+        if name in names:
+            continue
+        names.add(name)
+        inputs = call(tool, "GetInputList", None) or {}
+        for inp in (inputs.values() if isinstance(inputs, dict) else inputs):
+            connected = call(inp, "GetConnectedOutput", None)
+            if connected is not None:
+                pending.append(connected)
+    return names
+
+
+def _output_name(output):
+    tool = call(output, "GetTool", None) if output is not None else None
+    return _fusion_name(tool) if tool is not None else None
+
+
+def fusion_rebuild(comp, remove=()):
+    """Place every bridge stage, in order, directly before MediaOut.
+
+    Stages listed in ``remove`` are disconnected and deleted. MediaOut is
+    restored to its previous source if any step fails or does not read back.
+    """
+    media_out = _fusion_endpoint(comp, "MediaOut")
+    if media_out is None:
+        raise OperationError("Cannot locate MediaOut in this clip's Fusion composition; nothing was changed.")
+    out_input = call(media_out, "FindMainInput", None, 1)
+    if out_input is None:
+        raise OperationError("MediaOut has no main input this build exposes; nothing was changed.")
+    stages = _fusion_stages(comp)
+    original = call(out_input, "GetConnectedOutput", None)
+    source, _ = _fusion_walk(media_out, stages)
+    if source is None:
+        media_in = _fusion_endpoint(comp, "MediaIn")
+        source = call(media_in, "FindMainOutput", None, 1) if media_in is not None else None
+    if source is None:
+        raise OperationError("MediaOut has no source and no MediaIn was found; nothing was changed.")
+    upstream = _upstream_names(source)
+    placed, left_in_place, incomplete = [], [], []
+    for key in sorted(stages, key=_stage_sort_key):
+        ports = _stage_ports(stages[key])
+        output_name = _fusion_name(ports[1]) if ports else None
+        if key in remove:
+            if output_name in upstream:
+                raise OperationError(
+                    "%s sits before your own Fusion node; remove it on the Fusion page so your chain "
+                    "is not broken. Nothing was changed." % key)
+            continue
+        if ports is None:
+            incomplete.append(key)
+        elif output_name in upstream:
+            left_in_place.append(key)
+        else:
+            placed.append(key)
+    kept = {key: nodes for key, nodes in stages.items() if key not in remove}
+    try:
+        previous = source
+        for key in placed:
+            entries, output_tool = _stage_ports(stages[key])
+            for tool, input_name in entries:
+                if input_name is None:
+                    if not call(call(tool, "FindMainInput", None, 1), "ConnectTo", False, previous):
+                        raise OperationError("Fusion refused to connect %s." % _fusion_name(tool))
+                else:
+                    call(tool, "ConnectInput", None, input_name, previous)
+            previous = call(output_tool, "FindMainOutput", None, 1)
+            if previous is None:
+                raise OperationError("%s has no main output this build exposes." % _fusion_name(output_tool))
+        if not call(out_input, "ConnectTo", False, previous):
+            raise OperationError("Fusion refused to connect the bridge effects to MediaOut.")
+        after_source, after = _fusion_walk(media_out, kept)
+        if after != list(reversed(placed)) or _output_name(after_source) != _output_name(source):
+            raise OperationError("The rebuilt Fusion chain did not read back as expected; MediaOut was restored.")
+    except Exception:
+        call(out_input, "ConnectTo", None, original)
+        raise
+    removed = []
+    for key in remove:
+        for node in stages.get(key, {}).values():
+            call(node, "Delete", None)
+        if key in stages:
+            removed.append(key)
+    return {"source": _output_name(source), "stages": placed, "left_in_place": left_in_place,
+            "incomplete": incomplete, "removed": removed}
+
+
+class FusionEdit:
+    """One locked edit of a clip's comp: tag nodes, run Lua, rebuild the bridge chain."""
+
+    def __init__(self, ops, comp, stage):
+        self.ops = ops
+        self.comp = comp
+        self.stage = stage
+        self.nodes = _fusion_stages(comp).get(stage, {})
+        self.created = []
+        self.retired = []
+        value = call(comp, "GetAttrs", None, "COMPN_RenderStart")
+        try:
+            value = float(value)
+            self.t0 = value if math.isfinite(value) else 0.0
+        except (TypeError, ValueError):
+            self.t0 = 0.0
+
+    @staticmethod
+    def name(tool):
+        return _fusion_name(tool)
+
+    def _retire(self, node):
+        role = call(node, "GetData", None, FUSION_ROLE_KEY)
+        self.retired.append((node, _fusion_name(node), call(node, "GetData", None, FUSION_OWNER_KEY), role))
+        call(node, "SetData", None, FUSION_OWNER_KEY, FUSION_OWNER)
+        call(node, "SetData", None, FUSION_ROLE_KEY, "retired")
+        call(node, "SetAttrs", None, {"TOOLS_Name": "AIBridgeRetired_%s" % uuid.uuid4().hex[:8]})
+
+    def node(self, role, reg_ids, name):
+        """Reuse this stage's node for ``role``, or create one of the first available type."""
+        existing = self.nodes.get(role)
+        if existing is not None:
+            reg_id = call(existing, "GetAttrs", None, "TOOLS_RegID")
+            if reg_id is None or reg_id in reg_ids:
+                self._mark(existing, role, name)
+                return existing
+            self._retire(existing)
+        node = None
+        for reg_id in reg_ids:
+            node = call(self.comp, "AddTool", None, reg_id, -32768, -32768)
+            if node is not None:
+                break
+        if node is None:
+            raise OperationError("Fusion could not add a %s node on this build." % " or ".join(reg_ids))
+        self.created.append(node)
+        self._mark(node, role, name)
+        self.nodes[role] = node
+        return node
+
+    def drop(self, role):
+        """Delete this stage's ``role`` node once the chain has been rebuilt."""
+        node = self.nodes.pop(role, None)
+        if node is not None:
+            self._retire(node)
+
+    def _mark(self, node, role, name):
+        if _fusion_name(node) != name:
+            call(node, "SetAttrs", None, {"TOOLS_Name": name})
+        call(node, "SetData", None, FUSION_OWNER_KEY, FUSION_OWNER)
+        call(node, "SetData", None, FUSION_STAGE_KEY, self.stage)
+        call(node, "SetData", None, FUSION_ROLE_KEY, role)
+        if call(node, "GetData", None, FUSION_STAGE_KEY) != self.stage:
+            raise OperationError("Could not tag the bridge-owned Fusion node %s." % name)
+
+    @staticmethod
+    def has_input(node, input_name):
+        return call(node, "GetInput", None, input_name) is not None
+
+    def bind(self, var, node):
+        name = json.dumps(_fusion_name(node))
+        return "local %s = comp:FindTool(%s)\nassert(%s, %s)" % (
+            var, name, var, json.dumps("Fusion lost " + _fusion_name(node)))
+
+    @staticmethod
+    def static(var, input_name, value):
+        return ['%s:ConnectInput("%s", nil)' % (var, input_name), "%s.%s = %s" % (var, input_name, _lua_num(value))]
+
+    @staticmethod
+    def static_point(var, input_name, x, y):
+        return ['%s:ConnectInput("%s", nil)' % (var, input_name),
+                "%s.%s = {%s, %s}" % (var, input_name, _lua_num(x), _lua_num(y))]
+
+    def _keys(self, target, pairs):
+        """Key ``target`` once per listed clip frame, in compact Lua chunks."""
+        lines = []
+        runs = []
+        for frame, value in pairs:
+            if runs and frame == runs[-1][0] + len(runs[-1][1]) and len(runs[-1][1]) < LUA_KEY_CHUNK:
+                runs[-1][1].append(value)
+            else:
+                runs.append((int(frame), [value]))
+        for first, values in runs:
+            # Values sit in their own function so no chunk outgrows Lua's constant table.
+            lines.append("aib_keys(function(t, x) %s[t] = x end, %s, (function() return {%s} end)())"
+                         % (target, _lua_num(self.t0 + first), ",".join(_lua_num(v) for v in values)))
+        return lines
+
+    def animate(self, var, input_name, pairs):
+        return ["%s.%s = BezierSpline()" % (var, input_name)] + self._keys("%s.%s" % (var, input_name), pairs)
+
+    def animate_point(self, var, input_name, xs, ys):
+        path = "%s_%s" % (var, input_name.lower())
+        lines = ["%s.%s = XYPath()" % (var, input_name),
+                 "local %s = %s.%s:GetConnectedOutput():GetTool()" % (path, var, input_name),
+                 "%s.X = BezierSpline()" % path, "%s.Y = BezierSpline()" % path]
+        return lines + self._keys(path + ".X", xs) + self._keys(path + ".Y", ys)
+
+    def lua(self, lines):
+        """Run Lua in the comp: True if it finished, False if it stopped, None if unknowable."""
+        nonce = uuid.uuid4().hex
+        call(self.comp, "SetData", None, FUSION_LUA_KEY, "pending")
+        before = call(self.comp, "GetData", None, FUSION_LUA_KEY)
+        script = "\n".join([LUA_KEYS_HELPER] + list(lines) + ['comp:SetData("%s", "%s")' % (FUSION_LUA_KEY, nonce)])
+        call(self.comp, "Execute", None, script)
+        after = call(self.comp, "GetData", None, FUSION_LUA_KEY)
+        if after == nonce:
+            return True
+        return False if before == "pending" else None
+
+    def check(self, node, input_name, clip_frame, expected, tolerance=1e-3):
+        """Read an animated value back: True/False, or None when the build will not say."""
+        value = call(node, "GetInput", None, input_name, self.t0 + clip_frame)
+        try:
+            return abs(float(value) - float(expected)) <= tolerance
+        except (TypeError, ValueError):
+            return None
+
+    def finish(self):
+        chain = fusion_rebuild(self.comp)
+        for node, _, _, _ in self.retired:
+            call(node, "Delete", None)
+        self.retired = []
+        self.created = []
+        return chain
+
+    def rollback(self):
+        for node in self.created:
+            call(node, "Delete", None)
+        for node, name, owner, role in self.retired:
+            call(node, "SetAttrs", None, {"TOOLS_Name": name})
+            call(node, "SetData", None, FUSION_OWNER_KEY, owner)
+            call(node, "SetData", None, FUSION_ROLE_KEY, role)
+        self.created = []
+        self.retired = []
 
 
 class ResolveOperations:
@@ -1063,258 +1453,124 @@ class ResolveOperations:
         return ease_fn
 
     def _op_animate_zoom(self, params):
-        """Animate a clip's scale and framing over time using a Fusion composition with comprehensive curve presets.
+        """Animate a clip's scale and framing with a bridge-owned Fusion Transform.
 
-        Supports all standard video editing curves (Linear, Ease In, Quad In, Cubic In,
-        Ease Out, Quad Out, Cubic Out, Ease, Quad Ease, Cubic Ease, Circular Ease,
-        Rebound In / Anticipation, Rebound Out / Overshoot, Elastic Spring), full Zoom Out
-        direction support, multi-keyframe arrays, and automatic AI scenario heuristics.
+        Supports standard easing curves, Zoom Out direction, multi-keyframe
+        arrays and presets. The Transform joins the bridge's Fusion segment, so
+        blur, spotlight and user nodes stay connected.
         """
         item, info = self._resolve_one_item(params.get("item_id"), params.get("track_index"))
-        
-        # 1. Preset & Direction Resolution
+        if params.get("reset"):
+            return self._fusion_reset(item, info, "zoom")
+
         preset = str(params.get("preset", params.get("scenario", ""))).lower().strip()
         direction = str(params.get("direction", params.get("zoom_type", "in"))).lower().strip()
-        
         raw_start_zoom = params.get("start_zoom")
         raw_end_zoom = params.get("end_zoom")
         easing = str(params.get("easing", "")).lower().strip()
 
-        # Handle Presets
-        if preset in ("punch_in", "snap_in"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.35)
-            if not easing:
-                easing = "cubic_out"
-        elif preset in ("pop_in", "rebound", "overshoot"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.38)
-            if not easing:
-                easing = "rebound_out"
-        elif preset in ("slow_push", "ken_burns"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.15)
-            if not easing:
-                easing = "linear"
-        elif preset in ("dramatic", "build_up"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.60)
-            if not easing:
-                easing = "cubic_in"
-        elif preset in ("reveal", "zoom_out") or direction in ("out", "zoom_out"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.40)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.0)
-            if not easing:
-                easing = "cubic_out"
-        elif preset in ("cinematic", "glide"):
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.25)
-            if not easing:
-                easing = "cubic_ease"
+        # preset -> (default start, default end, default easing)
+        presets = {
+            "punch_in": (1.0, 1.35, "cubic_out"), "snap_in": (1.0, 1.35, "cubic_out"),
+            "pop_in": (1.0, 1.38, "rebound_out"), "rebound": (1.0, 1.38, "rebound_out"),
+            "overshoot": (1.0, 1.38, "rebound_out"),
+            "slow_push": (1.0, 1.15, "linear"), "ken_burns": (1.0, 1.15, "linear"),
+            "dramatic": (1.0, 1.60, "cubic_in"), "build_up": (1.0, 1.60, "cubic_in"),
+            "reveal": (1.40, 1.0, "cubic_out"), "zoom_out": (1.40, 1.0, "cubic_out"),
+            "cinematic": (1.0, 1.25, "cubic_ease"), "glide": (1.0, 1.25, "cubic_ease"),
+        }
+        if preset in presets:
+            default_start, default_end, default_easing = presets[preset]
+        elif direction in ("out", "zoom_out"):
+            default_start, default_end, default_easing = 1.40, 1.0, "cubic_out"
         else:
-            start_zoom = float(raw_start_zoom if raw_start_zoom is not None else 1.0)
-            end_zoom = float(raw_end_zoom if raw_end_zoom is not None else 1.5)
-            if not easing:
-                easing = "smootherstep"
-
-        # Explicit direction="out" override if start_zoom was default 1.0 and end_zoom was default 1.5
+            default_start, default_end, default_easing = 1.0, 1.5, "smootherstep"
+        start_zoom = float(raw_start_zoom if raw_start_zoom is not None else default_start)
+        end_zoom = float(raw_end_zoom if raw_end_zoom is not None else default_end)
+        easing = easing or default_easing
         if direction in ("out", "zoom_out") and start_zoom < end_zoom:
             start_zoom, end_zoom = end_zoom, start_zoom
-
-        if start_zoom <= 0 or end_zoom <= 0:
-            raise OperationError("start_zoom and end_zoom must be greater than 0 (1.0 is original size).")
 
         start_cx = float(params.get("start_center_x", params.get("center_x", 0.5)))
         start_cy = float(params.get("start_center_y", params.get("center_y", 0.5)))
         end_cx = float(params.get("target_center_x", params.get("target_x", 0.5)))
         end_cy = float(params.get("target_center_y", params.get("target_y", 0.5)))
 
-        duration = int(call(item, "GetDuration", 0) or 0)
-        start_frame = max(0, int(params.get("start_frame", 0) or 0))
-        end_frame = params.get("end_frame")
-        end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
-            if end_frame is None else int(end_frame)
-
-        ease_func = self._build_ease_func(easing)
-
-        trace = []
-
-        comp = call(item, "GetFusionCompByIndex", None, 1)
-        if comp is None:
-            comp = call(item, "AddFusionComp", None)
-            trace.append("added a new Fusion composition" if comp is not None else "AddFusionComp returned nothing")
-        else:
-            trace.append("reused the clip's existing Fusion composition")
-        if comp is None:
-            raise OperationError(
-                "Resolve did not return a Fusion composition for %s, so an animated zoom could not "
-                "be built. This clip type may not accept Fusion effects." % info["id"]
-            )
-
-        media_in = call(comp, "FindTool", None, "MediaIn1")
-        media_out = call(comp, "FindTool", None, "MediaOut1")
-
-        transform = call(comp, "FindTool", None, "AIBridgeZoom")
-        if transform is None:
-            transform = call(comp, "AddTool", None, "Transform", -32768, -32768)
-            if transform is not None:
-                try:
-                    transform.SetAttrs({"TOOLS_Name": "AIBridgeZoom"})
-                except Exception:
-                    pass
-            trace.append("added a Transform node" if transform is not None else "AddTool(Transform) failed")
-        else:
-            trace.append("reused the AIBridgeZoom Transform node")
-        if transform is None:
-            raise OperationError(
-                "Resolve created a Fusion composition but would not add a Transform node. "
-                "Animated zoom needs Fusion tool scripting, which this build did not expose. "
-                "Trace: %s" % "; ".join(trace)
-            )
-
-        # Wire MediaIn -> Transform -> MediaOut when the endpoints are visible.
-        try:
-            if media_in is not None:
-                transform.ConnectInput("Input", media_in)
-                trace.append("connected MediaIn into the Transform")
-            if media_out is not None:
-                media_out.ConnectInput("Input", transform)
-                trace.append("connected the Transform into MediaOut")
-        except Exception as exc:
-            trace.append("wiring the nodes raised %s (Fusion may have auto-connected)" % exc)
-
-        keyframes_created = False
         raw_keyframes = params.get("keyframes")
-        is_reset = bool(params.get("reset", False))
-        trace.append("debug_params: is_reset=%s, raw_kfs_type=%s, count=%s" % (is_reset, type(raw_keyframes).__name__, len(raw_keyframes) if isinstance(raw_keyframes, list) else 0))
-
-        try:
-            comp.Lock()
-            try:
-                if is_reset:
-                    # Reset Transform to identity (1.0x, center (0.5, 0.5))
-                    lua_lines = [
-                        "AIBridgeZoom.Size = 1.0",
-                        "AIBridgeZoom.Center = Point(0.5, 0.5)"
-                    ]
-                    comp.Execute("\n".join(lua_lines))
-                    keyframes_created = True
-                    trace.append("reset AIBridgeZoom Transform to 1.0x scale and centered framing")
-                elif raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
-                    # Sort keyframes by frame
-                    sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
-                    lua_lines = [
-                        "AIBridgeZoom.Size = BezierSpline()",
-                        "AIBridgeZoom.Center = Path()"
-                    ]
-                    # Generate multi-segment interpolation
-                    for i in range(len(sorted_kfs) - 1):
-                        k_curr = sorted_kfs[i]
-                        k_next = sorted_kfs[i + 1]
-                        
-                        f_start = int(k_curr.get("frame", 0))
-                        f_end = int(k_next.get("frame", f_start + 1))
-                        span = max(1, f_end - f_start)
-                        
-                        z_start = float(k_curr.get("zoom", k_curr.get("size", 1.0)))
-                        z_end = float(k_next.get("zoom", k_next.get("size", 1.0)))
-                        
-                        cx_start = float(k_curr.get("center_x", k_curr.get("cx", 0.5)))
-                        cx_end = float(k_next.get("center_x", k_next.get("cx", 0.5)))
-                        
-                        cy_start = float(k_curr.get("center_y", k_curr.get("cy", 0.5)))
-                        cy_end = float(k_next.get("center_y", k_next.get("cy", 0.5)))
-                        
-                        seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
-                        seg_ease_fn = self._build_ease_func(seg_easing)
-                        
-                        for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
-                            t = (f - f_start) / float(span)
-                            e = seg_ease_fn(t)
-                            z_val = z_start + (z_end - z_start) * e
-                            cx_val = cx_start + (cx_end - cx_start) * e
-                            cy_val = cy_start + (cy_end - cy_start) * e
-                            
-                            lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(f), z_val))
-                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(f), cx_val, cy_val))
-                    
-                    comp.Execute("\n".join(lua_lines))
-                    keyframes_created = True
-                    trace.append("generated multi-segment keyframe spline across %d control points" % len(sorted_kfs))
-                else:
-                    total_span = max(1, end_frame - start_frame)
-                    has_center_anim = (end_cx != 0.5 or end_cy != 0.5 or start_cx != 0.5 or start_cy != 0.5)
-                    lua_lines = [
-                        "AIBridgeZoom.Size = BezierSpline()"
-                    ]
-                    if has_center_anim:
-                        lua_lines.append("AIBridgeZoom.Center = Path()")
-
-                    if start_frame > 0:
-                        lua_lines.append("AIBridgeZoom.Size[0] = %f" % start_zoom)
-                        if has_center_anim:
-                            lua_lines.append("AIBridgeZoom.Center[0] = {%f, %f}" % (start_cx, start_cy))
-                    
-                    for f in range(start_frame, end_frame + 1):
-                        t = (f - start_frame) / float(total_span)
-                        val = start_zoom + (end_zoom - start_zoom) * ease_func(t)
-                        lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(f), val))
-                        if has_center_anim:
-                            cx = start_cx + (end_cx - start_cx) * ease_func(t)
-                            cy = start_cy + (end_cy - start_cy) * ease_func(t)
-                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(f), cx, cy))
-
-                    if duration and end_frame < duration - 1:
-                        lua_lines.append("AIBridgeZoom.Size[%f] = %f" % (float(duration - 1), end_zoom))
-                        if has_center_anim:
-                            lua_lines.append("AIBridgeZoom.Center[%f] = {%f, %f}" % (float(duration - 1), end_cx, end_cy))
-
-                    comp.Execute("\n".join(lua_lines))
-                    keyframes_created = True
-                    trace.append(
-                        "generated %d %s keyframes for Size (%.3f @f%d -> %.3f @f%d)"
-                        % (total_span + 1, easing, start_zoom, start_frame, end_zoom, end_frame)
-                    )
-            finally:
-                comp.Unlock()
-        except Exception as exc:
-            trace.append("keyframing raised %s" % exc)
-
-        if not keyframes_created:
-            try:
-                transform.Size = end_zoom
-                trace.append("set a static Size of %.3f as a fallback" % end_zoom)
-            except Exception as exc:
-                trace.append("static fallback raised %s" % exc)
-
-        if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
-            start_zoom = float(raw_keyframes[0].get("zoom", 1.0))
-            end_zoom = float(raw_keyframes[-1].get("zoom", 1.0))
-            start_frame = int(raw_keyframes[0].get("frame", 0))
-            end_frame = int(raw_keyframes[-1].get("frame", duration - 1))
+        if isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+            pairs = self._keyframe_offsets(item, raw_keyframes)
+            series = self._sample_keyframes(pairs, {
+                "size": lambda k: float(k.get("zoom", k.get("size", 1.0))),
+                "x": lambda k: float(k.get("center_x", k.get("cx", 0.5))),
+                "y": lambda k: float(k.get("center_y", k.get("cy", 0.5))),
+            })
+            start_frame, end_frame = pairs[0][0], pairs[-1][0]
+            start_zoom, end_zoom = series["size"][0][1], series["size"][-1][1]
             easing = "multi_segment_keyframes"
+            animate_center = True
+        else:
+            start_frame, end_frame = self._effect_range(item, params)
+            series = {"size": self._sample_range(start_frame, end_frame, start_zoom, end_zoom, easing)}
+            animate_center = any(abs(v - 0.5) > 1e-9 for v in (start_cx, start_cy, end_cx, end_cy))
+            if animate_center:
+                series["x"] = self._sample_range(start_frame, end_frame, start_cx, end_cx, easing)
+                series["y"] = self._sample_range(start_frame, end_frame, start_cy, end_cy, easing)
+        if min(value for _, value in series["size"]) <= 0:
+            raise OperationError("Zoom values must be greater than 0 (1.0 is original size).")
 
+        comp = self._fusion_comp(item, info)
+        comp.Lock()
+        edit = FusionEdit(self, comp, "zoom")
+        try:
+            node = edit.node("main", ("Transform",), "AIBridgeZoom")
+            lines = [edit.bind("zoom", node)]
+            lines += edit.animate("zoom", "Size", series["size"])
+            if animate_center:
+                lines += edit.animate_point("zoom", "Center", series["x"], series["y"])
+            else:
+                lines += edit.static_point("zoom", "Center", 0.5, 0.5)
+            lua_ok = edit.lua(lines)
+            fallback = False
+            if lua_ok is False:
+                # Keep the honest static fallback: a scale that holds, not a claimed animation.
+                fallback = bool(call(node, "SetInput", False, "Size", end_zoom))
+            chain = edit.finish()
+        except Exception:
+            edit.rollback()
+            raise
+        finally:
+            comp.Unlock()
+
+        verified = edit.check(node, "Size", end_frame, end_zoom) if lua_ok is not False else False
         result = {
             "item": info["id"],
-            "keyframes_created": keyframes_created,
+            "node": edit.name(node),
+            # None: this build reported neither the script's end nor the value.
+            "keyframes_created": lua_ok if lua_ok is not None else verified,
+            "keyframes_verified": verified,
             "start_zoom": start_zoom,
             "end_zoom": end_zoom,
             "easing": easing,
             "start_frame": start_frame,
             "end_frame": end_frame,
-            "trace": trace,
+            "frames": "clip offsets (0 = first frame of the clip)",
+            "fusion_start_frame": edit.t0,
+            "fusion_chain": chain,
         }
-        if not keyframes_created:
+        if lua_ok is False:
             result["note"] = (
-                "A Fusion Transform was created but its Size could not be keyframed through scripting "
-                "on this build. A static zoom was applied instead. Open the clip on the Fusion page to "
-                "animate it, or use set_clip_transform for a static scale."
+                "Fusion did not finish the keyframe script on this build. %s Open the clip on the "
+                "Fusion page to animate it, or use set_clip_transform for a static scale."
+                % ("A static Size of %.3f was applied instead." % end_zoom if fallback else "No zoom was applied.")
             )
+        elif verified is None:
+            result["note"] = ("Keyframes were sent, but this build did not let the bridge read the Size back. "
+                              "Check the clip on the Fusion page or with inspect_fusion.")
+        elif not verified:
+            result["note"] = ("Size reads back differently from the requested end zoom. "
+                              "Inspect the clip with inspect_fusion before continuing.")
         else:
-            result["note"] = (
-                "Butter-smooth %s animation generated in Fusion on %s (Frames %d to %d)."
-                % (easing, info["id"], start_frame, end_frame)
-            )
+            result["note"] = "%s zoom on %s, clip frames %d to %d." % (easing, info["id"], start_frame, end_frame)
         return result
 
     def _op_add_track(self, params):
@@ -1477,13 +1733,25 @@ class ResolveOperations:
             raise OperationError(
                 "Resolve rejected property '%s'. Current values: %s" % (name, json.dumps(available))
             )
-        return {"item": info["id"], "property": name, "value": value}
+        actual = plain(call(item, "GetProperty", None, name))
+        result = {"item": info["id"], "property": name, "value": value, "read_back": actual}
+        if actual is not None and str(actual) != str(value):
+            try:
+                same = abs(float(actual) - float(value)) < 1e-6
+            except (TypeError, ValueError):
+                same = False
+            if not same:
+                result["note"] = "Resolve accepted the call but reports %r, not %r." % (actual, value)
+        return result
 
     def _op_set_clip_enabled(self, params):
         item, info = self._find_timeline_items([params.get("item_id")])[0]
         enabled = bool(params.get("enabled", True))
         if not item.SetClipEnabled(enabled):
             raise OperationError("Resolve could not change the clip enabled state.")
+        actual = call(item, "GetClipEnabled", None)
+        if actual is not None and bool(actual) != enabled:
+            raise OperationError("Resolve accepted the change but the clip still reads enabled=%s." % bool(actual))
         return {"item": info["id"], "enabled": enabled}
 
     def _op_set_clip_color(self, params):
@@ -1495,6 +1763,9 @@ class ResolveOperations:
                 "Resolve rejected the clip color. Use a standard Resolve color name, or an empty "
                 "value to clear it."
             )
+        actual = call(item, "GetClipColor", None)
+        if actual is not None and str(actual).lower() != color.lower():
+            raise OperationError("Resolve accepted the color but the clip reads %r." % actual)
         return {"item": info["id"], "color": color or None}
 
     def _op_get_clip_grade(self, params):
@@ -1546,199 +1817,239 @@ class ResolveOperations:
             "applied": bool(ok),
         }
 
-    def _op_keyframe_clip_saturation(self, params):
-        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
-        comp = item.GetFusionCompByIndex(1)
-        if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            raise OperationError("Could not access or create Fusion composition on clip.")
+    # ------------------------------------------------------------- fusion ops
 
-        duration = int(call(item, "GetDuration", 75) or 75)
-        start_sat = float(params.get("start_saturation", 1.0))
-        end_sat = float(params.get("end_saturation", 0.0))
-        start_frame = int(params.get("start_frame", 0))
-        end_frame = int(params.get("end_frame", max(1, duration - 1)))
+    def _fusion_comp(self, item, info, create=True):
+        comp = call(item, "GetFusionCompByIndex", None, 1)
+        if comp is None and create:
+            comp = call(item, "AddFusionComp", None)
+            if comp is None:
+                raise OperationError(
+                    "Resolve did not return a Fusion composition for %s. This clip type may not "
+                    "accept Fusion effects." % info["id"])
+        return comp
 
+    def _fusion_reset(self, item, info, kind):
+        """Remove every bridge stage of ``kind``; user nodes and other effects stay connected."""
+        comp = self._fusion_comp(item, info, create=False)
+        if comp is None:
+            return {"item": info["id"], "reset": True, "removed": [], "note": "No Fusion composition; nothing to reset."}
         comp.Lock()
-        cc = None
-        tool_debug = {}
         try:
-            all_tools = comp.GetToolList(False) or {}
-            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
-            media_in = None
-            media_out = None
-
-            for t in tool_items:
-                t_name = getattr(t, "Name", str(t))
-                if "BrightnessContrast" in t_name or "ColorCorrector" in t_name:
-                    cc = t
-                elif "MediaIn" in t_name:
-                    media_in = t
-                elif "MediaOut" in t_name:
-                    media_out = t
-
-            if not cc:
-                # BrightnessContrast has direct "Saturation" property in Fusion
-                cc = comp.AddTool("BrightnessContrast")
-                if not cc:
-                    cc = comp.AddTool("ColorCorrector")
-
-            if cc and media_in and media_out:
-                try:
-                    cc.Input = media_in
-                except Exception:
-                    try:
-                        cc.ConnectInput("Input", media_in)
-                    except Exception:
-                        pass
-                try:
-                    media_out.Input = cc
-                except Exception:
-                    try:
-                        media_out.ConnectInput("Input", cc)
-                    except Exception:
-                        pass
-
-            if cc:
-                lua_cmd = """
-                ColorCorrector1.Saturation1 = BezierSpline()
-                ColorCorrector1.Saturation1[%f] = %f
-                ColorCorrector1.Saturation1[%f] = %f
-                """ % (float(start_frame), start_sat, float(end_frame), end_sat)
-                try:
-                    comp.Execute(lua_cmd)
-                    tool_debug["lua_execute_success"] = True
-                except Exception as e:
-                    tool_debug["lua_err"] = str(e)
-
+            keys = [key for key in _fusion_stages(comp) if key.partition(":")[0] == kind]
+            chain = fusion_rebuild(comp, remove=keys) if keys else None
         finally:
             comp.Unlock()
+        return {"item": info["id"], "reset": True, "removed": keys, "fusion_chain": chain,
+                "note": ("Removed the bridge %s nodes; your own Fusion nodes and other bridge effects stay connected." % kind)
+                if keys else "No bridge %s nodes were found; nothing was changed." % kind}
 
-        return {
-            "item": info["id"],
-            "name": info["name"],
-            "duration": duration,
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "start_saturation": start_sat,
-            "end_saturation": end_sat,
-            "tool_type": getattr(cc, "Name", str(cc)) if cc else None,
-            "tool_debug": tool_debug,
-            "applied": True,
-        }
+    def _effect_range(self, item, params):
+        """Return clip-relative (start, end) offsets for an effect.
+
+        ``start_frame``/``end_frame`` count from the clip's first frame.
+        ``timeline_start_frame``/``timeline_end_frame`` take absolute timeline frames.
+        """
+        duration = int(call(item, "GetDuration", 0) or 0)
+        clip_start = int(call(item, "GetStart", 0) or 0)
+
+        def offset(key, default):
+            absolute = params.get("timeline_" + key)
+            if absolute is not None:
+                return int(absolute) - clip_start
+            value = params.get(key)
+            return default if value is None else int(value)
+
+        start = offset("start_frame", 0)
+        end = offset("end_frame", duration - 1 if duration > 1 else start + 1)
+        last = duration - 1 if duration > 0 else None
+        if start < 0 or end <= start or (last is not None and end > last):
+            raise OperationError(
+                "Effect frames %d..%d (clip offsets) are outside this clip, which spans offsets 0..%s "
+                "(timeline frames %d..%s). end must be after start."
+                % (start, end, last if last is not None else "?", clip_start,
+                   clip_start + last if last is not None else "?"))
+        return start, end
+
+    def _keyframe_offsets(self, item, keyframes):
+        """Sort keyframes into (clip offset, dict); ``timeline_frame`` takes an absolute frame."""
+        duration = int(call(item, "GetDuration", 0) or 0)
+        clip_start = int(call(item, "GetStart", 0) or 0)
+        pairs = []
+        for key in keyframes:
+            if not isinstance(key, dict):
+                raise OperationError("Each keyframe must be an object with a frame or timeline_frame.")
+            frame = int(key["timeline_frame"]) - clip_start if key.get("timeline_frame") is not None else int(key.get("frame", 0))
+            if frame < 0 or (duration > 0 and frame > duration - 1):
+                raise OperationError("Keyframe at clip offset %d is outside this clip (0..%d)." % (frame, duration - 1))
+            pairs.append((frame, key))
+        pairs.sort(key=lambda pair: pair[0])
+        if any(a[0] == b[0] for a, b in zip(pairs, pairs[1:])):
+            raise OperationError("Two keyframes share the same frame; give each keyframe its own frame.")
+        return pairs
+
+    def _sample_keyframes(self, pairs, fields, default_easing="smootherstep"):
+        """Per-frame values between keyframes; ``fields`` maps a series name to a getter."""
+        series = {name: [] for name in fields}
+        for index in range(len(pairs) - 1):
+            (f0, k0), (f1, k1) = pairs[index], pairs[index + 1]
+            ease = self._build_ease_func(str(k1.get("easing", k0.get("easing", default_easing))).lower().strip())
+            stop = f1 + 1 if index == len(pairs) - 2 else f1
+            for frame in range(f0, stop):
+                eased = ease((frame - f0) / float(f1 - f0))
+                for name, get in fields.items():
+                    a, b = get(k0), get(k1)
+                    series[name].append((frame, a + (b - a) * eased))
+        return series
+
+    def _sample_range(self, start, end, a, b, easing):
+        ease = self._build_ease_func(easing)
+        span = float(end - start)
+        return [(frame, a + (b - a) * ease((frame - start) / span)) for frame in range(start, end + 1)]
+
+    @staticmethod
+    def _fusion_summary(verified, lua_ok):
+        if lua_ok is False:
+            return "Fusion stopped before the bridge script finished; the Resolve Console shows the Lua error. Nothing was connected."
+        if verified is None:
+            return "Sent to Fusion. This build did not let the bridge read the result back; check it with inspect_fusion or the Fusion page."
+        if not verified:
+            return "The value Fusion reads back differs from the request. Inspect the clip with inspect_fusion."
+        return None
+
+    def _op_keyframe_clip_saturation(self, params):
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
+        if params.get("reset"):
+            return self._fusion_reset(item, info, "saturation")
+        start_frame, end_frame = self._effect_range(item, params)
+        start_sat = float(params.get("start_saturation", 1.0))
+        end_sat = float(params.get("end_saturation", 0.0))
+        easing = str(params.get("easing", "linear")).lower().strip()
+        comp = self._fusion_comp(item, info)
+        comp.Lock()
+        edit = FusionEdit(self, comp, "saturation")
+        try:
+            node = edit.node("main", ("BrightnessContrast",), "AIBridgeSaturation")
+            if not edit.has_input(node, "Saturation"):
+                raise OperationError("Fusion's BrightnessContrast exposes no Saturation input on this build.")
+            lines = [edit.bind("sat", node)]
+            lines += edit.animate("sat", "Saturation", self._sample_range(start_frame, end_frame, start_sat, end_sat, easing))
+            lua_ok = edit.lua(lines)
+            if lua_ok is False:
+                raise OperationError(self._fusion_summary(None, False))
+            chain = edit.finish()
+        except Exception:
+            edit.rollback()
+            raise
+        finally:
+            comp.Unlock()
+        verified = edit.check(node, "Saturation", end_frame, end_sat)
+        result = {"item": info["id"], "name": info["name"], "node": edit.name(node),
+                  "start_frame": start_frame, "end_frame": end_frame, "frames": "clip offsets",
+                  "start_saturation": start_sat, "end_saturation": end_sat, "easing": easing,
+                  "fusion_start_frame": edit.t0, "applied": True, "verified": verified, "fusion_chain": chain}
+        note = self._fusion_summary(verified, lua_ok)
+        if note:
+            result["note"] = note
+        return result
 
     def _op_animate_color_fx(self, params):
-        import math
         import random
 
         item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
-        comp = item.GetFusionCompByIndex(1)
-        if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            raise OperationError("Could not access or create Fusion composition on clip.")
-
-        duration = int(call(item, "GetDuration", 75) or 75)
-        start_frame = int(params.get("start_frame", 0))
-        end_frame = int(params.get("end_frame", max(1, duration - 1)))
-        
+        if params.get("reset"):
+            return self._fusion_reset(item, info, "color_fx")
+        start_frame, end_frame = self._effect_range(item, params)
         rainbow = params.get("rainbow", True)
         rainbow_cycles = float(rainbow) if isinstance(rainbow, (int, float)) and not isinstance(rainbow, bool) else (1.5 if rainbow else 0.0)
         tint_strength = float(params.get("tint_strength", 0.70))
-        
         flicker = params.get("flicker", True)
         flicker_amp = float(flicker) if isinstance(flicker, (int, float)) and not isinstance(flicker, bool) else (0.05 if flicker else 0.0)
         flicker_freq = float(params.get("flicker_frequency", 2.2))
-        
         saturation = float(params.get("saturation", 1.3))
 
+        comp = self._fusion_comp(item, info)
         comp.Lock()
-        tool_debug = {}
+        edit = FusionEdit(self, comp, "color_fx")
         try:
-            all_tools = comp.GetToolList(False) or {}
-            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
-            cc = None
-            media_in = None
-            media_out = None
+            node = edit.node("main", ("ColorCorrector",), "AIBridgeColorFX")
 
-            for t in tool_items:
-                t_name = getattr(t, "Name", str(t))
-                if "ColorCorrector" in t_name:
-                    cc = t
-                elif "MediaIn" in t_name:
-                    media_in = t
-                elif "MediaOut" in t_name:
-                    media_out = t
+            def first_input(*names):
+                return next((name for name in names if edit.has_input(node, name)), None)
 
-            if not cc:
-                cc = comp.AddTool("ColorCorrector")
-                if media_in and media_out and cc:
-                    cc.ConnectInput("Input", media_in)
-                    media_out.ConnectInput("Input", cc)
-
-            lua_lines = [
-                "ColorCorrector1.Saturation1 = %f" % saturation,
-                "ColorCorrector1.WheelSaturation1 = %f" % saturation,
-            ]
-
+            sat_input = first_input("MasterSaturation", "Saturation1", "WheelSaturation1")
+            angle_input = first_input("WheelTintAngle1")
+            length_input = first_input("WheelTintLength1")
+            gain_input = first_input("MasterRGBGain")
+            missing = []
+            lines = [edit.bind("cc", node)]
+            if sat_input:
+                lines += edit.static("cc", sat_input, saturation)
+            else:
+                missing.append("saturation")
             if rainbow_cycles > 0:
-                lua_lines.append("ColorCorrector1.WheelTintLength1 = %f" % tint_strength)
-                lua_lines.append("ColorCorrector1.WheelTintAngle1 = BezierSpline()")
-                num_steps = max(16, (end_frame - start_frame) // 2)
-                for step in range(num_steps + 1):
-                    t = float(start_frame) + (float(end_frame - start_frame) * step / num_steps)
-                    angle = (step / num_steps) * rainbow_cycles
-                    lua_lines.append("ColorCorrector1.WheelTintAngle1[%f] = %f" % (t, angle))
-
+                if angle_input and length_input:
+                    lines += edit.static("cc", length_input, tint_strength)
+                    steps = max(16, (end_frame - start_frame) // 2)
+                    keys = {}
+                    for step in range(steps + 1):
+                        frame = int(round(start_frame + (end_frame - start_frame) * step / float(steps)))
+                        keys[frame] = (step / float(steps)) * rainbow_cycles
+                    lines += edit.animate("cc", angle_input, sorted(keys.items()))
+                else:
+                    missing.append("rainbow tint")
             if flicker_amp > 0:
-                lua_lines.append("ColorCorrector1.MasterRGBGain = BezierSpline()")
-                rng = random.Random(42)
-                for f in range(start_frame, end_frame + 1):
-                    wave1 = math.sin(f * flicker_freq * 0.8) * 0.55
-                    wave2 = math.cos(f * flicker_freq * 1.6) * 0.30
-                    noise = (rng.random() - 0.5) * 0.30
-                    gain = 1.0 + (wave1 + wave2 + noise) * flicker_amp
-                    lua_lines.append("ColorCorrector1.MasterRGBGain[%f] = %f" % (float(f), gain))
-
-            full_lua = "\n".join(lua_lines)
-            comp.Execute(full_lua)
-            tool_debug["lua_executed"] = True
+                if gain_input:
+                    rng = random.Random(42)
+                    pairs = []
+                    for frame in range(start_frame, end_frame + 1):
+                        wave = math.sin(frame * flicker_freq * 0.8) * 0.55 + math.cos(frame * flicker_freq * 1.6) * 0.30
+                        pairs.append((frame, 1.0 + (wave + (rng.random() - 0.5) * 0.30) * flicker_amp))
+                    lines += edit.animate("cc", gain_input, pairs)
+                else:
+                    missing.append("flicker")
+            requested = 1 + (rainbow_cycles > 0) + (flicker_amp > 0)
+            if len(missing) == requested:
+                raise OperationError("Fusion's ColorCorrector exposes none of the inputs this effect needs on this build.")
+            lua_ok = edit.lua(lines)
+            if lua_ok is False:
+                raise OperationError(self._fusion_summary(None, False))
+            chain = edit.finish()
+        except Exception:
+            edit.rollback()
+            raise
         finally:
             comp.Unlock()
+        result = {"item": info["id"], "name": info["name"], "node": edit.name(node),
+                  "start_frame": start_frame, "end_frame": end_frame, "frames": "clip offsets",
+                  "rainbow_cycles": rainbow_cycles, "tint_strength": tint_strength,
+                  "flicker_amplitude": flicker_amp, "saturation": saturation,
+                  "fusion_start_frame": edit.t0, "applied": True, "fusion_chain": chain}
+        if missing:
+            result["not_applied"] = missing
+            result["note"] = "This build's ColorCorrector lacks the inputs for: %s. Those parts were skipped." % ", ".join(missing)
+        elif lua_ok is None:
+            result["note"] = self._fusion_summary(None, None)
+        return result
 
-        return {
-            "item": info["id"],
-            "name": info["name"],
-            "duration": duration,
-            "start_frame": start_frame,
-            "end_frame": end_frame,
-            "rainbow_cycles": rainbow_cycles,
-            "tint_strength": tint_strength,
-            "flicker_amplitude": flicker_amp,
-            "saturation": saturation,
-            "applied": True,
-        }
+    # blur_type keyword -> (Fusion tool IDs to try, size inputs to try)
+    BLUR_TYPES = (
+        ("defocus", ("Defocus",), ("XDefocusSize", "YDefocusSize", "DefocusSize")),
+        ("mosaic", ("Mosaic", "MosaicBlur"), ("BlockSize", "Size")),
+        ("pixel", ("Mosaic", "MosaicBlur"), ("BlockSize", "Size")),
+        ("directional", ("DirectionalBlur",), ("Length",)),
+        ("motion", ("DirectionalBlur",), ("Length",)),
+        ("", ("Blur",), ("XBlurSize", "YBlurSize")),
+    )
 
     def _op_apply_blur_effect(self, params):
-        """Apply a static or dynamic (gradual) blur effect to a full frame or masked bounding region."""
-        import math
+        """Apply a static or gradual blur to the full frame or a masked region."""
         item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index"))
-        comp = item.GetFusionCompByIndex(1)
-        if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            raise OperationError("Could not create or access Fusion composition on %s." % info["id"])
-
-        duration = int(call(item, "GetDuration", 0) or 0)
-        start_frame = max(0, int(params.get("start_frame", 0) or 0))
-        end_frame = params.get("end_frame")
-        end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
-            if end_frame is None else int(end_frame)
-
+        if params.get("reset"):
+            return self._fusion_reset(item, info, "blur")
         blur_type = str(params.get("blur_type", "gaussian")).lower().strip()
+        reg_ids, size_inputs = next((ids, inputs) for word, ids, inputs in self.BLUR_TYPES if word in blur_type)
         blur_size = float(params.get("blur_size", params.get("size", 20.0)))
-        
         cx = float(params.get("center_x", params.get("x", 0.50)))
         cy = float(params.get("center_y", params.get("y", 0.50)))
         w = float(params.get("width", params.get("w", 1.0)))
@@ -1746,498 +2057,223 @@ class ResolveOperations:
         corner_radius = float(params.get("corner_radius", 0.0))
         soft_edge = float(params.get("soft_edge", 0.015))
         mask_shape = str(params.get("mask_shape", "rectangle")).lower().strip()
-
-        mask_name = str(params.get("mask_name", params.get("name", "1"))).strip()
-        safe_tag = "".join(c for c in mask_name if c.isalnum()) or "1"
-        blur_node_name = "AIBridgeBlur_" + safe_tag
-        mask_node_name = "AIBridgeMask_" + safe_tag
-
+        tag = "".join(c for c in str(params.get("mask_name", params.get("name", "1"))) if c.isalnum()) or "1"
         animate = bool(params.get("animate", False))
         start_blur = float(params.get("start_blur", 0.0))
         end_blur = float(params.get("end_blur", blur_size))
         easing = str(params.get("easing", "smootherstep")).lower().strip()
-        ease_fn = self._build_ease_func(easing)
+        raw_keyframes = params.get("keyframes")
+        use_keys = isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2
+        has_mask = w < 0.999 or h < 0.999 or cx != 0.50 or cy != 0.50 or use_keys
+        start_frame, end_frame = self._effect_range(item, params)
+        series = {}
+        if use_keys:
+            pairs = self._keyframe_offsets(item, raw_keyframes)
+            series = self._sample_keyframes(pairs, {
+                "size": lambda k: float(k.get("blur_size", k.get("size", blur_size))),
+                "x": lambda k: float(k.get("center_x", k.get("cx", cx))),
+                "y": lambda k: float(k.get("center_y", k.get("cy", cy))),
+                "w": lambda k: float(k.get("width", k.get("w", w))),
+                "h": lambda k: float(k.get("height", k.get("h", h))),
+            })
+            start_frame, end_frame = pairs[0][0], pairs[-1][0]
+            final_size = series["size"][-1][1]
+        elif animate:
+            series["size"] = self._sample_range(start_frame, end_frame, start_blur, end_blur, easing)
+            final_size = end_blur
+        else:
+            final_size = blur_size
 
-        is_reset = bool(params.get("reset", False))
-
+        comp = self._fusion_comp(item, info)
         comp.Lock()
-        trace = []
+        edit = FusionEdit(self, comp, "blur:" + tag)
         try:
-            # Check existing tools
-            all_tools = comp.GetToolList(False) or {}
-            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
-            media_in = None
-            media_out = None
-            existing_blur_nodes = []
-
-            for t in tool_items:
-                t_name = getattr(t, "Name", str(t))
-                if t_name == "MediaIn1" or (not media_in and "MediaIn" in t_name):
-                    media_in = t
-                elif t_name == "MediaOut1" or (not media_out and "MediaOut" in t_name):
-                    media_out = t
-                elif t_name.startswith("AIBridgeBlur_") or t_name in ("FavoritesBlur", "PrivacyBlur"):
-                    existing_blur_nodes.append(t)
-
-            if is_reset:
-                # Remove all blur nodes and reconnect MediaIn1 -> MediaOut1 (or zoom)
-                lua_cleanup = []
-                for b in existing_blur_nodes:
-                    b_name = getattr(b, "Name", str(b))
-                    lua_cleanup.append("local b = comp:FindTool('%s'); if b then b:Delete() end" % b_name)
-                if media_in and media_out:
-                    lua_cleanup.append("MediaOut1:ConnectInput('Input', MediaIn1)")
-                comp.Execute("\n".join(lua_cleanup))
-                trace.append("reset all blur nodes")
-                return {
-                    "item": info["id"],
-                    "reset": True,
-                    "trace": trace,
-                    "note": "Reset and removed all blur nodes from %s." % info["id"]
-                }
-
-            # Map blur type to Fusion RegID
-            reg_id = "Blur"
-            if "defocus" in blur_type:
-                reg_id = "Defocus"
-            elif "mosaic" in blur_type or "pixel" in blur_type:
-                reg_id = "MosaicBlur"
-            elif "directional" in blur_type or "motion" in blur_type:
-                reg_id = "DirectionalBlur"
-
-            lua_lines = []
-            # Create or reuse blur tool
-            lua_lines.append("local blur = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (blur_node_name, reg_id))
-            lua_lines.append("blur:SetAttrs({TOOLS_Name = '%s'})" % blur_node_name)
-
-            # Create or reuse mask if localized
-            raw_keyframes = params.get("keyframes")
-            has_mask = (w < 0.999 or h < 0.999 or cx != 0.50 or cy != 0.50 or bool(raw_keyframes))
+            node = edit.node("main", reg_ids, "AIBridgeBlur_" + tag)
+            inputs = [name for name in size_inputs if edit.has_input(node, name)]
+            if not inputs:
+                raise OperationError("Fusion's %s node exposes none of %s on this build; choose blur_type='gaussian'."
+                                     % (" / ".join(reg_ids), ", ".join(size_inputs)))
+            lines = [edit.bind("blur", node)]
+            for name in inputs:
+                lines += edit.animate("blur", name, series["size"]) if "size" in series else edit.static("blur", name, blur_size)
+            mask = None
             if has_mask:
-                mask_reg_id = "EllipseMask" if "ellipse" in mask_shape or "circle" in mask_shape else "RectangleMask"
-                lua_lines.append("local mask = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (mask_node_name, mask_reg_id))
-                lua_lines.append("mask:SetAttrs({TOOLS_Name = '%s'})" % mask_node_name)
-                lua_lines.append("mask.Center = {%f, %f}" % (cx, cy))
-                lua_lines.append("mask.Width = %f" % w)
-                lua_lines.append("mask.Height = %f" % h)
-                if mask_reg_id == "RectangleMask":
-                    lua_lines.append("mask.CornerRadius = %f" % corner_radius)
-                lua_lines.append("mask.SoftEdge = %f" % soft_edge)
-                lua_lines.append("blur:ConnectInput('EffectMask', mask)")
-
-            # Configure blur size or dynamic keyframes
-            raw_keyframes = params.get("keyframes")
-            if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
-                sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
-                lua_lines.append("blur.XBlurSize = BezierSpline()")
-                lua_lines.append("blur.YBlurSize = BezierSpline()")
-                if has_mask:
-                    lua_lines.append("mask.Width = BezierSpline()")
-                    lua_lines.append("mask.Height = BezierSpline()")
-                    lua_lines.append("mask.Center = XYPath()")
-                    lua_lines.append("local xy = mask.Center:GetConnectedOutput():GetTool()")
-                    lua_lines.append("xy.X = BezierSpline()")
-                    lua_lines.append("xy.Y = BezierSpline()")
-
-                for i in range(len(sorted_kfs) - 1):
-                    k_curr = sorted_kfs[i]
-                    k_next = sorted_kfs[i + 1]
-                    f_start = int(k_curr.get("frame", 0))
-                    f_end = int(k_next.get("frame", f_start + 1))
-                    span = max(1, f_end - f_start)
-
-                    b_start = float(k_curr.get("blur_size", k_curr.get("size", blur_size)))
-                    b_end = float(k_next.get("blur_size", k_next.get("size", blur_size)))
-
-                    cx_start = float(k_curr.get("center_x", k_curr.get("cx", cx)))
-                    cx_end = float(k_next.get("center_x", k_next.get("cx", cx)))
-
-                    cy_start = float(k_curr.get("center_y", k_curr.get("cy", cy)))
-                    cy_end = float(k_next.get("center_y", k_next.get("cy", cy)))
-
-                    w_start = float(k_curr.get("width", k_curr.get("w", w)))
-                    w_end = float(k_next.get("width", k_next.get("w", w)))
-
-                    h_start = float(k_curr.get("height", k_curr.get("h", h)))
-                    h_end = float(k_next.get("height", k_next.get("h", h)))
-
-                    seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
-                    seg_ease_fn = self._build_ease_func(seg_easing)
-
-                    for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
-                        t = (f - f_start) / float(span)
-                        e = seg_ease_fn(t)
-                        b_val = b_start + (b_end - b_start) * e
-                        lua_lines.append("blur.XBlurSize[%f] = %f" % (float(f), b_val))
-                        lua_lines.append("blur.YBlurSize[%f] = %f" % (float(f), b_val))
-                        if has_mask:
-                            cx_val = cx_start + (cx_end - cx_start) * e
-                            cy_val = cy_start + (cy_end - cy_start) * e
-                            w_val = w_start + (w_end - w_start) * e
-                            h_val = h_start + (h_end - h_start) * e
-                            lua_lines.append("mask.Width[%f] = %f" % (float(f), w_val))
-                            lua_lines.append("mask.Height[%f] = %f" % (float(f), h_val))
-                            lua_lines.append("xy.X[%f] = %f" % (float(f), cx_val))
-                            lua_lines.append("xy.Y[%f] = %f" % (float(f), cy_val))
-                trace.append("generated multi-segment keyframe blur spline across %d waypoints" % len(sorted_kfs))
-            elif animate:
-                lua_lines.append("blur.XBlurSize = BezierSpline()")
-                lua_lines.append("blur.YBlurSize = BezierSpline()")
-                total_span = max(1, end_frame - start_frame)
-                if start_frame > 0:
-                    lua_lines.append("blur.XBlurSize[0] = %f" % start_blur)
-                    lua_lines.append("blur.YBlurSize[0] = %f" % start_blur)
-                for f in range(start_frame, end_frame + 1):
-                    t = (f - start_frame) / float(total_span)
-                    val = start_blur + (end_blur - start_blur) * ease_fn(t)
-                    lua_lines.append("blur.XBlurSize[%f] = %f" % (float(f), val))
-                    lua_lines.append("blur.YBlurSize[%f] = %f" % (float(f), val))
-                if duration and end_frame < duration - 1:
-                    lua_lines.append("blur.XBlurSize[%f] = %f" % (float(duration - 1), end_blur))
-                    lua_lines.append("blur.YBlurSize[%f] = %f" % (float(duration - 1), end_blur))
-                trace.append("animated blur %.1f -> %.1f across frames %d..%d" % (start_blur, end_blur, start_frame, end_frame))
+                shape = "EllipseMask" if "ellipse" in mask_shape or "circle" in mask_shape else "RectangleMask"
+                mask = edit.node("mask", (shape,), "AIBridgeMask_" + tag)
+                lines.append(edit.bind("mask", mask))
+                if use_keys:
+                    lines += edit.animate("mask", "Width", series["w"]) + edit.animate("mask", "Height", series["h"])
+                    lines += edit.animate_point("mask", "Center", series["x"], series["y"])
+                else:
+                    lines += edit.static("mask", "Width", w) + edit.static("mask", "Height", h)
+                    lines += edit.static_point("mask", "Center", cx, cy)
+                if shape == "RectangleMask":
+                    lines += edit.static("mask", "CornerRadius", corner_radius)
+                lines += edit.static("mask", "SoftEdge", soft_edge)
+                lines.append('blur:ConnectInput("EffectMask", mask)')
             else:
-                lua_lines.append("blur.XBlurSize = %f" % blur_size)
-                lua_lines.append("blur.YBlurSize = %f" % blur_size)
-                trace.append("set static blur size %.1f" % blur_size)
-
-            # Wiring: Chain with existing nodes
-            lua_lines.append('''
-                local mi = comp:FindTool("MediaIn1")
-                local mo = comp:FindTool("MediaOut1")
-                local b_fav = comp:FindTool("AIBridgeBlur_favorites")
-                local b_search = comp:FindTool("AIBridgeBlur_search")
-                local b_priv = comp:FindTool("AIBridgeBlur_privacy")
-                local zoom = comp:FindTool("AIBridgeZoom")
-                local cc = comp:FindTool("ColorCorrector1")
-
-                local prev = mi
-                if b_fav then
-                    b_fav:ConnectInput("Input", prev)
-                    prev = b_fav
-                end
-                if b_search then
-                    b_search:ConnectInput("Input", prev)
-                    prev = b_search
-                end
-                if b_priv then
-                    b_priv:ConnectInput("Input", prev)
-                    prev = b_priv
-                end
-                if zoom then
-                    zoom:ConnectInput("Input", prev)
-                    prev = zoom
-                end
-                if cc then
-                    cc:ConnectInput("Input", prev)
-                    prev = cc
-                end
-                if mo then
-                    mo:ConnectInput("Input", prev)
-                end
-            ''')
-
-            comp.Execute("\n".join(lua_lines))
-            trace.append("successfully compiled and wired %s in Fusion" % blur_node_name)
+                lines.append('blur:ConnectInput("EffectMask", nil)')
+                edit.drop("mask")
+            lua_ok = edit.lua(lines)
+            if lua_ok is False:
+                raise OperationError(self._fusion_summary(None, False))
+            chain = edit.finish()
+        except Exception:
+            edit.rollback()
+            raise
         finally:
             comp.Unlock()
-
-        return {
+        verified = edit.check(node, inputs[0], end_frame, final_size) if "size" in series else edit.check(node, inputs[0], 0, blur_size)
+        result = {
             "item": info["id"],
-            "blur_node": blur_node_name,
-            "mask_node": mask_node_name if has_mask else None,
+            "blur_node": edit.name(node),
+            "blur_type": call(node, "GetAttrs", None, "TOOLS_RegID") or reg_ids[0],
+            "size_inputs": inputs,
+            "mask_node": edit.name(mask) if mask is not None else None,
             "blur_size": blur_size,
-            "animated": animate,
-            "start_blur": start_blur if animate else None,
-            "end_blur": end_blur if animate else None,
-            "start_frame": start_frame if animate else None,
-            "end_frame": end_frame if animate else None,
+            "animated": "size" in series,
+            "start_blur": start_blur if animate and not use_keys else None,
+            "end_blur": final_size if "size" in series else None,
+            "start_frame": start_frame if series else None,
+            "end_frame": end_frame if series else None,
+            "frames": "clip offsets",
             "center": [cx, cy] if has_mask else [0.5, 0.5],
             "dimensions": [w, h] if has_mask else [1.0, 1.0],
-            "trace": trace,
-            "note": "Applied %s %s effect on %s." % ("dynamic" if animate else "static", blur_type, info["id"])
+            "verified": verified,
+            "fusion_start_frame": edit.t0,
+            "fusion_chain": chain,
         }
+        result["note"] = self._fusion_summary(verified, lua_ok) or "Applied %s %s blur on %s." % (
+            "animated" if series else "static", blur_type, info["id"])
+        return result
 
     def _op_apply_spotlight_mask(self, params):
-        """Apply a dynamic or static spotlight reveal mask with adjustable feathering and ambient darkness."""
+        """Apply a static or animated spotlight: dim the frame outside a soft mask."""
         item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index"))
-        comp = item.GetFusionCompByIndex(1)
-        if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            raise OperationError("Could not create or access Fusion composition on %s." % info["id"])
-
-        duration = int(call(item, "GetDuration", 0) or 0)
-        start_frame = max(0, int(params.get("start_frame", 0) or 0))
-        end_frame = params.get("end_frame")
-        end_frame = max(start_frame + 1, duration - 1 if duration else start_frame + 1) \
-            if end_frame is None else int(end_frame)
-
+        if params.get("reset"):
+            return self._fusion_reset(item, info, "spotlight")
         cx = float(params.get("center_x", params.get("x", 0.50)))
         cy = float(params.get("center_y", params.get("y", 0.50)))
         radius = float(params.get("radius", params.get("size", 0.20)))
-        w = float(params.get("width", params.get("w", radius * 2 if "radius" in params or "size" in params else 0.40)))
-        h = float(params.get("height", params.get("h", radius * 2 if "radius" in params or "size" in params else 0.40)))
+        sized = "radius" in params or "size" in params
+        w = float(params.get("width", params.get("w", radius * 2 if sized else 0.40)))
+        h = float(params.get("height", params.get("h", radius * 2 if sized else 0.40)))
         soft_edge = float(params.get("soft_edge", params.get("feather", 0.08)))
-        ambient_brightness = max(0.0, min(1.0, float(params.get("ambient_brightness", params.get("base_gain", 0.08)))))
+        ambient = max(0.0, min(1.0, float(params.get("ambient_brightness", params.get("base_gain", 0.08)))))
         spotlight_gain = float(params.get("spotlight_gain", params.get("gain", 1.0)))
         mask_shape = str(params.get("shape", params.get("mask_shape", "ellipse"))).lower().strip()
+        tag = "".join(c for c in str(params.get("mask_name", params.get("name", "1"))) if c.isalnum()) or "1"
+        raw_keyframes = params.get("keyframes")
+        start_frame, end_frame = self._effect_range(item, params)
+        series = {}
+        if isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
+            pairs = self._keyframe_offsets(item, raw_keyframes)
 
-        mask_name = str(params.get("mask_name", params.get("name", "1"))).strip()
-        safe_tag = "".join(c for c in mask_name if c.isalnum()) or "1"
-        base_node_name = "AIBridgeSpotlightBase_" + safe_tag
-        mask_node_name = "AIBridgeSpotlightMask_" + safe_tag
-        merge_node_name = "AIBridgeSpotlightMerge_" + safe_tag
-        fg_gain_node_name = "AIBridgeSpotlightGain_" + safe_tag
+            def size(axis):
+                def get(k):
+                    r = float(k.get("radius", k.get("size", radius)))
+                    return float(k.get(axis, k.get(axis[0], r * 2)))
+                return get
+            series = self._sample_keyframes(pairs, {
+                "x": lambda k: float(k.get("x", k.get("center_x", cx))),
+                "y": lambda k: float(k.get("y", k.get("center_y", cy))),
+                "w": size("width"), "h": size("height"),
+            })
+            start_frame, end_frame = pairs[0][0], pairs[-1][0]
+        elif params.get("animate"):
+            start_rad = float(params.get("start_radius", radius))
+            end_rad = float(params.get("end_radius", 2.0 if params.get("expand") else radius))
+            easing = str(params.get("easing", "cubic_out")).lower().strip()
+            radii = self._sample_range(start_frame, end_frame, start_rad, end_rad, easing)
+            series = {"w": [(f, r * 2) for f, r in radii], "h": [(f, r * 2) for f, r in radii]}
 
-        is_reset = bool(params.get("reset", False))
-
+        comp = self._fusion_comp(item, info)
         comp.Lock()
-        trace = []
+        edit = FusionEdit(self, comp, "spotlight:" + tag)
         try:
-            all_tools = comp.GetToolList(False) or {}
-            tool_items = list(all_tools.values()) if isinstance(all_tools, dict) else list(all_tools)
-            media_in = None
-            media_out = None
-            existing_spotlight_nodes = []
-
-            for t in tool_items:
-                t_name = getattr(t, "Name", str(t))
-                if t_name == "MediaIn1" or (not media_in and "MediaIn" in t_name):
-                    media_in = t
-                elif t_name == "MediaOut1" or (not media_out and "MediaOut" in t_name):
-                    media_out = t
-                elif t_name.startswith("AIBridgeSpotlight"):
-                    existing_spotlight_nodes.append(t)
-
-            if is_reset:
-                lua_cleanup = []
-                for node in existing_spotlight_nodes:
-                    n_name = getattr(node, "Name", str(node))
-                    lua_cleanup.append("local n = comp:FindTool('%s'); if n then n:Delete() end" % n_name)
-                if media_in and media_out:
-                    lua_cleanup.append("MediaOut1:ConnectInput('Input', MediaIn1)")
-                comp.Execute("\n".join(lua_cleanup))
-                trace.append("reset all spotlight mask nodes")
-                return {
-                    "item": info["id"],
-                    "reset": True,
-                    "trace": trace,
-                    "note": "Reset and removed all spotlight mask nodes from %s." % info["id"]
-                }
-
-            lua_lines = []
-            # 1. Base Dark Layer (BrightnessContrast)
-            lua_lines.append("local base = comp:FindTool('%s') or comp:AddTool('BrightnessContrast', -32768, -32768)" % base_node_name)
-            lua_lines.append("base:SetAttrs({TOOLS_Name = '%s'})" % base_node_name)
-            lua_lines.append("base.Gain = %f" % ambient_brightness)
-
-            # 2. Foreground Gain Layer (if spotlight_gain != 1.0)
-            use_fg_gain = (abs(spotlight_gain - 1.0) > 0.001)
-            if use_fg_gain:
-                lua_lines.append("local fg_gain = comp:FindTool('%s') or comp:AddTool('BrightnessContrast', -32768, -32768)" % fg_gain_node_name)
-                lua_lines.append("fg_gain:SetAttrs({TOOLS_Name = '%s'})" % fg_gain_node_name)
-                lua_lines.append("fg_gain.Gain = %f" % spotlight_gain)
-
-            # 3. Spotlight Mask (EllipseMask or RectangleMask)
-            mask_reg_id = "RectangleMask" if "rect" in mask_shape else "EllipseMask"
-            lua_lines.append("local mask = comp:FindTool('%s') or comp:AddTool('%s', -32768, -32768)" % (mask_node_name, mask_reg_id))
-            lua_lines.append("mask:SetAttrs({TOOLS_Name = '%s'})" % mask_node_name)
-            lua_lines.append("mask.Center = {%f, %f}" % (cx, cy))
-            lua_lines.append("mask.Width = %f" % w)
-            lua_lines.append("mask.Height = %f" % h)
-            lua_lines.append("mask.SoftEdge = %f" % soft_edge)
-
-            # 4. Merge Node
-            lua_lines.append("local merge = comp:FindTool('%s') or comp:AddTool('Merge', -32768, -32768)" % merge_node_name)
-            lua_lines.append("merge:SetAttrs({TOOLS_Name = '%s'})" % merge_node_name)
-
-            # 5. Keyframing
-            raw_keyframes = params.get("keyframes")
-            if raw_keyframes and isinstance(raw_keyframes, list) and len(raw_keyframes) >= 2:
-                sorted_kfs = sorted(raw_keyframes, key=lambda k: int(k.get("frame", 0)))
-                lua_lines.append("mask.Width = BezierSpline()")
-                lua_lines.append("mask.Height = BezierSpline()")
-                lua_lines.append("mask.Center = XYPath()")
-                lua_lines.append("local xy = mask.Center:GetConnectedOutput():GetTool()")
-                lua_lines.append("xy.X = BezierSpline()")
-                lua_lines.append("xy.Y = BezierSpline()")
-
-                for i in range(len(sorted_kfs) - 1):
-                    k_curr = sorted_kfs[i]
-                    k_next = sorted_kfs[i + 1]
-                    f_start = int(k_curr.get("frame", 0))
-                    f_end = int(k_next.get("frame", f_start + 1))
-                    span = max(1, f_end - f_start)
-
-                    cx_start = float(k_curr.get("x", k_curr.get("center_x", cx)))
-                    cy_start = float(k_curr.get("y", k_curr.get("center_y", cy)))
-                    cx_end = float(k_next.get("x", k_next.get("center_x", cx)))
-                    cy_end = float(k_next.get("y", k_next.get("center_y", cy)))
-
-                    rad_start = float(k_curr.get("radius", k_curr.get("size", radius)))
-                    rad_end = float(k_next.get("radius", k_next.get("size", radius)))
-                    w_start = float(k_curr.get("width", k_curr.get("w", rad_start * 2)))
-                    w_end = float(k_next.get("width", k_next.get("w", rad_end * 2)))
-                    h_start = float(k_curr.get("height", k_curr.get("h", rad_start * 2)))
-                    h_end = float(k_next.get("height", k_next.get("h", rad_end * 2)))
-
-                    seg_easing = str(k_next.get("easing", k_curr.get("easing", "smootherstep"))).lower().strip()
-                    seg_ease_fn = self._build_ease_func(seg_easing)
-
-                    for f in range(f_start, f_end + (1 if i == len(sorted_kfs) - 2 else 0)):
-                        t = (f - f_start) / float(span)
-                        e = seg_ease_fn(t)
-                        cx_val = cx_start + (cx_end - cx_start) * e
-                        cy_val = cy_start + (cy_end - cy_start) * e
-                        w_val = w_start + (w_end - w_start) * e
-                        h_val = h_start + (h_end - h_start) * e
-                        lua_lines.append("mask.Width[%f] = %f" % (float(f), w_val))
-                        lua_lines.append("mask.Height[%f] = %f" % (float(f), h_val))
-                        lua_lines.append("xy.X[%f] = %f" % (float(f), cx_val))
-                        lua_lines.append("xy.Y[%f] = %f" % (float(f), cy_val))
-                trace.append("animated spotlight mask across %d keyframe waypoints" % len(sorted_kfs))
-            elif params.get("animate"):
-                animate_expand = bool(params.get("expand", False))
-                start_rad = float(params.get("start_radius", radius))
-                end_rad = float(params.get("end_radius", 2.0 if animate_expand else radius))
-                easing = str(params.get("easing", "cubic_out")).lower().strip()
-                ease_fn = self._build_ease_func(easing)
-                total_span = max(1, end_frame - start_frame)
-
-                lua_lines.append("mask.Width = BezierSpline()")
-                lua_lines.append("mask.Height = BezierSpline()")
-                for f in range(start_frame, end_frame + 1):
-                    t = (f - start_frame) / float(total_span)
-                    r_val = start_rad + (end_rad - start_rad) * ease_fn(t)
-                    lua_lines.append("mask.Width[%f] = %f" % (float(f), r_val * 2))
-                    lua_lines.append("mask.Height[%f] = %f" % (float(f), r_val * 2))
-                trace.append("animated spotlight radius %.2f -> %.2f across frames %d..%d" % (start_rad, end_rad, start_frame, end_frame))
-
-            # Wiring:
-            # MediaIn1 -> base -> merge.Background
-            # MediaIn1 -> (fg_gain) -> merge.Foreground
-            # mask -> merge.EffectMask
-            # merge -> MediaOut1
-            lua_lines.append('''
-                local mi = comp:FindTool("MediaIn1")
-                local mo = comp:FindTool("MediaOut1")
-                local base = comp:FindTool("%s")
-                local mask = comp:FindTool("%s")
-                local merge = comp:FindTool("%s")
-                local fg_gain = comp:FindTool("%s")
-
-                if mi and base then
-                    base:ConnectInput("Input", mi)
-                end
-                if base and merge then
-                    merge:ConnectInput("Background", base)
-                end
-                if mi and merge then
-                    if fg_gain then
-                        fg_gain:ConnectInput("Input", mi)
-                        merge:ConnectInput("Foreground", fg_gain)
-                    else
-                        merge:ConnectInput("Foreground", mi)
-                    end
-                end
-                if mask and merge then
-                    merge:ConnectInput("EffectMask", mask)
-                end
-                if merge and mo then
-                    mo:ConnectInput("Input", merge)
-                end
-            ''' % (base_node_name, mask_node_name, merge_node_name, fg_gain_node_name))
-
-            comp.Execute("\n".join(lua_lines))
-            trace.append("successfully compiled and wired spotlight mask graph in Fusion")
+            base = edit.node("base", ("BrightnessContrast",), "AIBridgeSpotlightBase_" + tag)
+            gain = edit.node("gain", ("BrightnessContrast",), "AIBridgeSpotlightGain_" + tag)
+            shape = "RectangleMask" if "rect" in mask_shape else "EllipseMask"
+            mask = edit.node("mask", (shape,), "AIBridgeSpotlightMask_" + tag)
+            merge = edit.node("merge", ("Merge",), "AIBridgeSpotlightMerge_" + tag)
+            lines = [edit.bind("base", base), edit.bind("gain", gain), edit.bind("mask", mask), edit.bind("merge", merge)]
+            lines += edit.static("base", "Gain", ambient) + edit.static("gain", "Gain", spotlight_gain)
+            if "w" in series:
+                lines += edit.animate("mask", "Width", series["w"]) + edit.animate("mask", "Height", series["h"])
+            else:
+                lines += edit.static("mask", "Width", w) + edit.static("mask", "Height", h)
+            if "x" in series:
+                lines += edit.animate_point("mask", "Center", series["x"], series["y"])
+            else:
+                lines += edit.static_point("mask", "Center", cx, cy)
+            lines += edit.static("mask", "SoftEdge", soft_edge)
+            lines += ['merge:ConnectInput("Background", base)', 'merge:ConnectInput("Foreground", gain)',
+                      'merge:ConnectInput("EffectMask", mask)']
+            lua_ok = edit.lua(lines)
+            if lua_ok is False:
+                raise OperationError(self._fusion_summary(None, False))
+            chain = edit.finish()
+        except Exception:
+            edit.rollback()
+            raise
         finally:
             comp.Unlock()
-
-        return {
+        final_w = series["w"][-1][1] if "w" in series else w
+        verified = edit.check(mask, "Width", end_frame if series else 0, final_w)
+        result = {
             "item": info["id"],
-            "base_node": base_node_name,
-            "mask_node": mask_node_name,
-            "merge_node": merge_node_name,
-            "ambient_brightness": ambient_brightness,
+            "base_node": edit.name(base),
+            "gain_node": edit.name(gain),
+            "mask_node": edit.name(mask),
+            "merge_node": edit.name(merge),
+            "ambient_brightness": ambient,
             "spotlight_gain": spotlight_gain,
             "center": [cx, cy],
             "dimensions": [w, h],
             "soft_edge": soft_edge,
-            "trace": trace,
-            "note": "Applied spotlight reveal mask to %s." % info["id"]
+            "animated": bool(series),
+            "start_frame": start_frame if series else None,
+            "end_frame": end_frame if series else None,
+            "frames": "clip offsets",
+            "verified": verified,
+            "fusion_start_frame": edit.t0,
+            "fusion_chain": chain,
         }
+        result["note"] = self._fusion_summary(verified, lua_ok) or "Applied spotlight mask to %s." % info["id"]
+        return result
 
     def _op_inspect_fusion(self, params):
-        item, info = self._resolve_one_item(params.get("item_id"), track_hint="video")
-        comp = item.GetFusionCompByIndex(1)
-        if not comp:
-            comp = item.AddFusionComp()
-        if not comp:
-            return {"error": "No Fusion composition found on clip"}
-        
-        comp.Lock()
-        result = {"tools": {}, "comp_attrs": {}}
-        try:
-            if params.get("exec_lua"):
-                comp.Execute(params["exec_lua"])
-                result["lua_executed"] = True
-            result["comp_attrs"] = {
-                "global_start": call(comp, "GetAttrs", 0, "COMPN_GlobalStart"),
-                "global_end": call(comp, "GetAttrs", 0, "COMPN_GlobalEnd"),
-                "render_start": call(comp, "GetAttrs", 0, "COMPN_RenderStart"),
-                "render_end": call(comp, "GetAttrs", 0, "COMPN_RenderEnd"),
-                "current_time": call(comp, "GetAttrs", 0, "COMPN_CurrentTime"),
-            }
-            tools = comp.GetToolList(False) or {}
-            tool_items = list(tools.values()) if isinstance(tools, dict) else list(tools)
-            for tool in tool_items:
-                name = getattr(tool, "Name", str(tool))
-                inputs = []
-                inps = tool.GetInputList() or {}
-                inp_list = list(inps.values()) if isinstance(inps, dict) else list(inps)
-                for inp in inp_list:
-                    try:
-                        inp_id = str(inp.GetAttrs("INPS_ID"))
-                        inp_name = str(inp.GetAttrs("INPS_Name"))
-                        conn = inp.GetConnectedOutput()
-                        connected_tool = None
-                        if conn:
-                            parent = conn.GetTool()
-                            connected_tool = getattr(parent, "Name", str(parent)) if parent else str(conn)
-                        inputs.append({"id": inp_id, "name": inp_name, "connected_to": connected_tool})
-                    except Exception as e:
-                        inputs.append({"err": str(e)})
-                
-                # Check main outputs
-                outs = tool.GetOutputList() or {}
-                out_list = list(outs.values()) if isinstance(outs, dict) else list(outs)
-                output_names = []
-                for out in out_list:
-                    try:
-                        output_names.append(str(out.GetAttrs("OUTS_ID")))
-                    except Exception:
-                        pass
-
-                # Get current input values for Transform, MediaIn, and TimeSpeed
-                val_info = {}
-                for inp_key in ("Size", "Center", "GlobalIn", "GlobalOut", "HoldFirstFrame", "HoldLastFrame", "Speed", "InterpolateBetweenFrames"):
-                    try:
-                        v = tool.GetInput(inp_key, 8.0)
-                        if v is not None:
-                            val_info[inp_key] = str(v)
-                    except Exception:
-                        pass
-
-                result["tools"][name] = {
-                    "reg_id": str(call(tool, "GetAttrs", "", "TOOLS_RegID")),
-                    "inputs": [i for i in inputs if i.get("connected_to") or i.get("id") in ("Input", "Size", "Center", "Saturation1")],
-                    "outputs": output_names,
-                    "values_at_f8": val_info,
-                }
-        finally:
-            comp.Unlock()
-        return result
+        """Read-only view of a clip's Fusion nodes and the bridge segment. Never creates a comp."""
+        item, info = self._resolve_one_item(params.get("item_id"), track_hint=params.get("track_index") or "video")
+        comp = self._fusion_comp(item, info, create=False)
+        if comp is None:
+            return {"item": info["id"], "has_fusion": False, "tools": {}, "bridge_stages": {}}
+        attrs = {key: call(comp, "GetAttrs", None, "COMPN_" + key) for key in ("GlobalStart", "GlobalEnd", "RenderStart", "RenderEnd")}
+        tools = {}
+        for tool in _fusion_tools(comp):
+            inputs = []
+            listed = call(tool, "GetInputList", None) or {}
+            for inp in (listed.values() if isinstance(listed, dict) else listed):
+                connected = call(inp, "GetConnectedOutput", None)
+                source = call(connected, "GetTool", None) if connected is not None else None
+                if source is not None:
+                    inputs.append({"id": str(call(inp, "GetAttrs", "", "INPS_ID")), "connected_to": _fusion_name(source)})
+            owned = _fusion_role(tool)
+            tools[_fusion_name(tool)] = {"reg_id": call(tool, "GetAttrs", None, "TOOLS_RegID"),
+                                         "connected_inputs": inputs,
+                                         "bridge_stage": owned[0] if owned else None}
+        stages = _fusion_stages(comp)
+        media_out = _fusion_endpoint(comp, "MediaOut")
+        chain = None
+        if media_out is not None:
+            try:
+                source, keys = _fusion_walk(media_out, stages)
+                chain = {"source": _output_name(source), "stages_before_media_out": list(reversed(keys))}
+            except OperationError as exc:
+                chain = {"error": str(exc)}
+        return {"item": info["id"], "has_fusion": True, "comp": attrs, "tools": tools,
+                "bridge_stages": {key: {role: _fusion_name(node) for role, node in nodes.items()} for key, nodes in stages.items()},
+                "bridge_chain": chain}
 
     def _op_delete_clips(self, params):
         ids = params.get("item_ids") or []
@@ -2289,6 +2325,36 @@ class ResolveOperations:
             "output_dir": output_dir,
             "preset": preset or None,
         }
+
+    def _op_render_status(self, params):
+        """Progress of queued render jobs, from Resolve's ordinary render API (works in Free)."""
+        project = self._project()
+        wanted = str(params.get("job_id") or "").strip()
+        jobs = call(project, "GetRenderJobList", []) or []
+        listed = {str(job.get("JobId")): job for job in jobs if isinstance(job, dict) and job.get("JobId")}
+        if wanted and wanted not in listed:
+            raise OperationError("Render job '%s' is not in the queue. Call render_status without job_id to list jobs." % wanted)
+        report = []
+        for job_id in ([wanted] if wanted else list(listed)):
+            job = listed[job_id]
+            status = call(project, "GetRenderJobStatus", None, job_id)
+            status = status if isinstance(status, dict) else {}
+            entry = {
+                "job_id": job_id,
+                "status": status.get("JobStatus"),
+                "percent": status.get("CompletionPercentage"),
+                "time_remaining_ms": status.get("EstimatedTimeRemainingInMs"),
+                "time_taken_ms": status.get("TimeTakenToRenderInMs"),
+                "timeline": job.get("TimelineName"),
+                "output": str(Path(job["TargetDir"]) / job["OutputFilename"]) if job.get("TargetDir") and job.get("OutputFilename") else None,
+            }
+            if status.get("Error"):
+                entry["error"] = status["Error"]
+            if not status:
+                entry["note"] = "Resolve returned no status for this job."
+            report.append(entry)
+        return {"rendering": bool(call(project, "IsRenderingInProgress", False)), "jobs": report,
+                "note": None if report else "The render queue is empty."}
 
     def _source_window(self, item, timeline_frame):
         """Normal-speed source mapping; refuse known retiming rather than guessing."""
@@ -2878,9 +2944,33 @@ class ResolveOperations:
         for field, actual, expected in (("frame_rate", self._project_rate(), expected_fps), ("width", width, expected_width), ("height", height, expected_height)):
             if expected is not None and abs(float(actual) - float(expected)) > 0.01:
                 findings.append({"type": "delivery_mismatch", "field": field, "actual": actual, "expected": expected, "severity": "warning"})
+        findings.extend(self._free_limits(width, height, self._project_rate()))
         return {"project": project.GetName(), "timeline": self._timeline_identity(timeline), "findings": findings,
                 "warning_count": sum(f["severity"] == "warning" for f in findings),
-                "scope": "Active timeline. Gaps/disabled tracks can be intentional. Missing-file checks may flag image-sequence patterns. Delivery settings are compared only with the expectations you supply; this does not inspect Fairlight mute automation or queued render settings."}
+                "scope": "Active timeline. Gaps/disabled tracks can be intentional. Missing-file checks may flag image-sequence patterns. Delivery settings are compared with the expectations you supply and, on Resolve Free, with Free's UHD/60 fps delivery ceiling; this does not inspect Fairlight mute automation or queued render settings."}
+
+    def _free_limits(self, width, height, fps):
+        """Timeline settings DaVinci Resolve (Free) cannot deliver: above UHD or 60 fps."""
+        product = str(call(self.resolve, "GetProductName", "") or "")
+        if "studio" in product.lower():
+            return []
+        severity = "warning" if product else "info"
+        limits = []
+        try:
+            if max(int(width), int(height)) > FREE_MAX_LONG_EDGE or min(int(width), int(height)) > FREE_MAX_SHORT_EDGE:
+                limits.append({"type": "free_resolution_limit", "actual": "%dx%d" % (int(width), int(height)),
+                               "limit": "%dx%d" % (FREE_MAX_LONG_EDGE, FREE_MAX_SHORT_EDGE), "severity": severity,
+                               "note": "DaVinci Resolve (Free) renders at most UHD. Lower the timeline resolution or render with Studio."})
+            if float(fps) > FREE_MAX_FPS + 0.01:
+                limits.append({"type": "free_frame_rate_limit", "actual": round(float(fps), 3), "limit": FREE_MAX_FPS,
+                               "severity": severity,
+                               "note": "DaVinci Resolve (Free) delivers at most 60 fps. Lower the timeline frame rate or render with Studio."})
+        except (TypeError, ValueError):
+            return []
+        if limits and not product:
+            for finding in limits:
+                finding["note"] += " Resolve did not report its edition, so this applies only if you use the Free version."
+        return limits
 
     def _op_bridge_capabilities(self, _params):
         import shutil
@@ -3082,6 +3172,7 @@ class ResolveOperations:
             "save_project": self._op_save_project,
             "list_render_presets": self._op_list_render_presets,
             "render_current_timeline": self._op_render_current_timeline,
+            "render_status": self._op_render_status,
             "timeline_frame": self._op_timeline_frame,
             "timeline_audio": self._op_timeline_audio,
             "create_compound_clip": self._op_create_compound_clip,

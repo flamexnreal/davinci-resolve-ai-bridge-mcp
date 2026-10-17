@@ -11,7 +11,7 @@ npm run build
 python3 tools/doctor.py
 ```
 
-The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets and Python cache files. Per-folder `.npmignore` rules keep caches out even after running tests.
+The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. `tests/test_fusion.py` drives the Fusion effects against an in-memory comp; with the optional `lupa` package installed (`python3 -m pip install lupa`) it also runs every generated Lua script in LuaJIT, the Lua engine Fusion uses, and checks where the keyframes land. Without `lupa` those Lua cases skip. A simulated comp is not a live Fusion page. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets and Python cache files. Per-folder `.npmignore` rules keep caches out even after running tests.
 
 The doctor is a separate installed-runtime diagnostic. It can make a read-only status round trip to Resolve. A missing/stopped Console worker is a runtime warning, not proof of a code failure.
 
@@ -34,7 +34,9 @@ Use a disposable project/timeline with short media. Start the Console worker, th
 7. Analyze stereo audio, trailing silence, and a trimmed source range. Confirm each channel's peak is visible and exported WAV duration matches the selection.
 8. On one isolated dialogue clip or aligned AV pair, call `review_silence`. Audition yellow markers. Pass only accepted marker IDs to `apply_silence_cuts`. Confirm the original is intact and the preview closes the selected gaps. Check audio gain, fades and sync manually.
 9. Move/trim a clip after creating review markers. Confirm applying the stale markers is refused.
-10. Supply delivery dimensions to `project_health`; verify mismatch findings. Treat track gaps and disabled clips as informational until reviewed.
+10. Supply delivery dimensions to `project_health`; verify mismatch findings. Treat track gaps and disabled clips as informational until reviewed. On a UHD-plus or above-60 fps timeline, confirm the Free limit findings appear.
+11. On a clip with your own Fusion node (for example a Glow), apply `animate_zoom`, then `apply_blur_effect` with a `mask_name`, then `apply_spotlight_mask`. Confirm with `inspect_fusion` and the Fusion page that all three and your node are connected, and that the zoom keyframes start at the clip's first frame. Reset each effect and confirm your node stays connected.
+12. Queue a short render, start it with approval, and follow it with `render_status` until it reports complete.
 
 Record Resolve version, edition, OS, decoder, result, and limitations in the release notes. A passing mock test is not a claim of live Free-version validation.
 

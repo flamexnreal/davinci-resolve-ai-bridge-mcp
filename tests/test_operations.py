@@ -78,6 +78,34 @@ class OperationTests(unittest.TestCase):
     def add_review(self):
         analysis={'item_id':self.timeline.clips[0].uid,'truncated':False,'cuts':[{'timeline_start_frame':20,'timeline_end_frame':40}]}
         with patch.object(self.op,'_op_timeline_audio',return_value=analysis):return self.op._op_review_silence({})['markers'][0]['marker_id']
+    def test_health_flags_free_delivery_limits(self):
+        self.timeline.fps=120
+        with patch.object(self.op,'_project_resolution',return_value=(4096,2160)):
+            types={f['type'] for f in self.op._op_project_health({})['findings']}
+        self.assertTrue({'free_resolution_limit','free_frame_rate_limit'}<=types)
+        with patch.object(self.op,'_project_resolution',return_value=(3840,2160)):
+            self.timeline.fps=60;types={f['type'] for f in self.op._op_project_health({})['findings']}
+        self.assertFalse({'free_resolution_limit','free_frame_rate_limit'}&types)
+        with patch('fakes.Resolve.GetProductName',return_value='DaVinci Resolve Studio'):
+            self.timeline.fps=120;self.assertEqual(self.op._free_limits(7680,4320,120),[])
+    def test_render_status_reports_jobs(self):
+        self.project.GetRenderJobList=lambda:[{'JobId':'j1','TimelineName':'Original','TargetDir':'/out','OutputFilename':'a.mp4'}]
+        self.project.GetRenderJobStatus=lambda job:{'JobStatus':'Rendering','CompletionPercentage':42}
+        self.project.IsRenderingInProgress=lambda:True
+        r=self.op._op_render_status({})
+        self.assertTrue(r['rendering']);self.assertEqual(r['jobs'][0]['percent'],42)
+        self.assertEqual(r['jobs'][0]['output'],str(Path('/out')/'a.mp4'))
+        with self.assertRaises(OperationError):self.op._op_render_status({'job_id':'missing'})
+        self.project.GetRenderJobList=lambda:[];self.assertEqual(self.op._op_render_status({})['jobs'],[])
+    def test_edits_are_read_back(self):
+        clip=self.timeline.clips[0];item=clip.GetUniqueId()
+        self.assertEqual(self.op._op_set_clip_property({'item_id':item,'property_name':'ZoomX','value':2})['read_back'],2)
+        clip.SetProperty=lambda key,value:True
+        self.assertIn('note',self.op._op_set_clip_property({'item_id':item,'property_name':'ZoomX','value':3}))
+        clip.SetClipEnabled=lambda value:True
+        with self.assertRaises(OperationError):self.op._op_set_clip_enabled({'item_id':item,'enabled':False})
+        clip.SetClipColor=lambda value:True
+        with self.assertRaises(OperationError):self.op._op_set_clip_color({'item_id':item,'color':'Orange'})
     def test_silence_markers_are_non_destructive(self):
         self.add_review();self.assertEqual(len(self.timeline.clips),1);self.assertEqual(self.timeline.delete_calls,0)
     def test_selected_silence_applied_only_on_copy(self):

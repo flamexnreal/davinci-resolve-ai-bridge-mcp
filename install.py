@@ -5,7 +5,6 @@ import argparse
 import json
 import os
 import platform
-import secrets
 import shlex
 import shutil
 import subprocess
@@ -17,12 +16,13 @@ from pathlib import Path
 
 
 from bridge.operations import AGENT_VERSION as VERSION
-from bridge.lifecycle import WorkerLock
+from bridge.lifecycle import WorkerLock, load_token, replace_token
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 TOKEN_FILE = HOME / "token.txt"
 
 MENU_FOLDER = "Resolve AI Bridge"
+CONFIG_BACKUPS_KEPT = 3
 # Stray scripts from earlier hand-made experiments that clutter Workspace >
 # Scripts. The installer moves any it finds out of Resolve's Utility folder into
 # a reversible backup rather than deleting them outright. Matching is by exact
@@ -140,17 +140,7 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
 
 
 def get_token(rotate=False):
-    if TOKEN_FILE.exists() and not rotate:
-        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
-        if token:
-            return token
-    token = "rab_" + secrets.token_urlsafe(32)
-    TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
-    try:
-        os.chmod(str(TOKEN_FILE), 0o600)
-    except OSError:
-        pass
-    return token
+    return replace_token(TOKEN_FILE) if rotate else load_token(TOKEN_FILE)
 
 
 def install_dependencies(skip=False):
@@ -427,6 +417,13 @@ def auto_configure_clients(entry):
             if config_path.is_file():
                 backup = config_path.with_name(config_path.name + ".backup-%d" % time.time_ns())
                 shutil.copy2(config_path, backup)
+                # Keep the newest few backups instead of one per install. copy2 keeps the
+                # config's own mtime, so order by the timestamp in the name.
+                backups = sorted((path for path in config_path.parent.glob(config_path.name + ".backup-*")
+                                  if path.name.rpartition("-")[2].isdigit()),
+                                 key=lambda path: int(path.name.rpartition("-")[2]))
+                for stale in backups[:-CONFIG_BACKUPS_KEPT]:
+                    stale.unlink(missing_ok=True)
             fd, temporary = tempfile.mkstemp(prefix="." + config_path.name, dir=str(config_path.parent))
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:

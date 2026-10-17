@@ -146,6 +146,16 @@ Reconstruction is restricted where source timing or effect preservation is uncer
 
 The updated bridge only resets nodes tagged as its own. User-made and older untagged TimeSpeed nodes are preserved because their ownership cannot be determined safely. Inspect/remove the old node manually if appropriate. Reverse mapping is not verified and is refused.
 
+## A Fusion effect replaced another, or a blur did nothing
+
+Before 1.13.0, each Fusion effect rewired the clip on its own: a new zoom could cut out a blur, a spotlight could cut out a zoom, and a blur with the default name was never connected. Apply any one effect again with 1.13.0 or later: the bridge reconnects every bridge effect it finds (including ones named `AIBridge...` by older versions) in one chain, without moving your own nodes. Check the result with `inspect_fusion`.
+
+If a bridge effect sits before one of your own Fusion nodes, it is left where it is and reported in `left_in_place`. Resetting it there is refused so your chain is not broken; remove it on the Fusion page instead.
+
+## Effect frames are refused as outside the clip
+
+Fusion effect frames count from the clip's first frame. A clip starting at timeline frame 1000 with 120 frames accepts `start_frame` 0 to 119. Pass `timeline_start_frame` / `timeline_end_frame` (or keyframe `timeline_frame`) to give absolute timeline frames instead.
+
 ## Existing client configuration was not updated
 
 Malformed JSON or an unexpected structure is preserved rather than overwritten. Fix the existing configuration, then rerun setup. Successful merges create a timestamped .backup file next to the original.

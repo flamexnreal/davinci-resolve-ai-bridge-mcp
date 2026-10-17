@@ -117,10 +117,11 @@ Studio can use the same menu workflow. To allow direct attach, set **Preferences
 | --- | --- |
 | Find your bearings | Inspect clips, tracks, markers, media, project settings, and timeline health. |
 | Build the timeline | Import media, place images and overlays, create timelines, and group compound clips. |
-| Add movement | Set clip transforms, animate zooms, adjust supported speed controls, and apply spotlight/blur workflows. |
+| Add movement | Set clip transforms, animate zooms, adjust supported speed controls, and stack spotlight/blur effects. |
 | Work with color | Read and adjust supported grades, animate saturation, and add color shifts. |
 | Review before committing | Try edits on duplicate timelines, compare structure, and mark candidate silence cuts. |
 | Check source media | View source frames and analyze source audio levels, silence, and timing. |
+| Deliver | Queue an approved render, follow its progress, and catch settings Resolve Free can't render. |
 
 <br>
 
@@ -134,19 +135,20 @@ Studio can use the same menu workflow. To allow direct attach, set **Preferences
 | `timeline_frame` | Return a native MCP image plus metadata. Composite capture is attempted first; FFmpeg source fallback is labeled explicitly. |
 | `timeline_audio` | Source PCM peak/RMS per channel, silence intervals, energy envelope, onsets, activity clusters or a trimmed WAV. |
 | `preview_timeline`, `compare_timelines` | Duplicate/open a review timeline and compare structure/properties/markers without switching during comparison. |
-| `project_health` | Check active-timeline missing sources, gaps, disabled/locked tracks/clips and supplied delivery expectations. |
+| `project_health` | Check active-timeline missing sources, gaps, disabled/locked tracks/clips, supplied delivery expectations and Resolve Free's UHD/60 fps render limits. |
 | `review_silence`, `apply_silence_cuts` | Place candidate markers, then apply explicitly accepted intervals on a duplicate of an isolated dialogue clip or aligned AV pair. |
 | `open_timeline`, `create_timeline`, `set_playhead`, `open_page` | Navigate Resolve. |
 | `list_media`, `import_media`, `append_media`, `add_image` | Inspect/import/place media and duration-controlled stills. |
-| `set_clip_transform`, `get_clip_transform`, `animate_zoom` | Static transforms and native Fusion animation. |
+| `set_clip_transform`, `get_clip_transform`, `animate_zoom` | Static transforms and a keyframed Fusion zoom that keeps your other Fusion nodes connected. |
 | `split_clip` | Rebuild a normal-speed clip into two pieces, with a verified timeline checkpoint first. See restrictions below. |
 | `insert_title` | Best-effort title insertion; check `text_set`. |
 | `create_compound_clip`, `change_clip_speed` | Compound creation and constant video speed through a bridge-owned TimeSpeed node. |
-| `get_clip_grade`, `set_clip_grade`, `keyframe_clip_saturation`, `animate_color_fx` | Inspect/change available grade controls and Fusion color animation. |
-| `apply_blur_effect`, `apply_spotlight_mask`, `inspect_fusion` | Existing Fusion blur/mask workflows and inspection. |
+| `get_clip_grade`, `set_clip_grade`, `keyframe_clip_saturation`, `animate_color_fx` | Inspect/change available grade controls and Fusion color animation on bridge-owned nodes. |
+| `apply_blur_effect`, `apply_spotlight_mask` | Stackable Fusion blurs (gaussian, defocus, directional) and spotlight masks, static or keyframed. |
+| `inspect_fusion` | Read-only view of a clip's Fusion nodes and the bridge's effect chain. |
 | `add_marker`, `delete_marker`, `set_clip_property`, `set_clip_color`, `set_clip_enabled` | Markers and clip metadata/state. |
 | `add_track`, `set_track_name`, `delete_clips`, `save_project` | Track management, explicitly requested deletion, and saving. |
-| `list_render_presets`, `render_current_timeline` | Inspect available presets and queue/start an approved render. |
+| `list_render_presets`, `render_current_timeline`, `render_status` | Inspect presets, queue/start an approved render, and follow its progress. |
 
 </details>
 
@@ -177,6 +179,8 @@ For custom typography, lower thirds, or animated callouts, your AI can create a 
 
 All public `frame` inputs and clip start/end positions use **absolute timeline frames**. Marker offsets are relative to timeline start. Timecodes support non-drop-frame and 29.97/59.94 drop-frame (`HH:MM:SS;FF`). Cut end positions are exclusive.
 
+Fusion effects (`animate_zoom`, blur, spotlight, saturation, color fx) are the exception, because they live inside one clip: `start_frame`, `end_frame` and keyframe `frame` count from the clip's first frame (0). Pass `timeline_start_frame`, `timeline_end_frame` or keyframe `timeline_frame` to use absolute timeline frames instead.
+
 </details>
 
 <br>
@@ -189,6 +193,7 @@ All public `frame` inputs and clip start/end positions use **absolute timeline f
 - **Audio:** Analysis reads source PCM, not the Fairlight mix. It excludes timeline gain, fades, mute, effects and retiming. Known source retiming is rejected. Silence uses 50 ms windows, not speech transcription. Results include the source offset, absolute timeline origin, exclusive ends and a truncation flag; default analysis limit is 300 seconds.
 - **Splits:** Fusion clips, locked tracks, mixed rates and known retiming are rejected before deletion. A checkpoint is retained. Rebuilt clips restore static transforms, enabled state, clip color and the current color-grade layer. Audio links, fades, keyframes, other grade layers and all metadata are not guaranteed. On failure, the tool opens the checkpoint and reports any partial attempted timeline honestly.
 - **Dialogue cuts:** Automatic application is restricted to one isolated clip or one aligned video/audio pair. It rejects stale review markers and complex multi-clip timelines. The original is kept intact. Review audio gain, fades and non-review markers on the result.
+- **Fusion effects:** Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain in front of MediaOut, so they stack and your own Fusion nodes stay connected. Resets remove only bridge-owned nodes. Every result reports the chain and whether values read back. These effects are tested against a simulated Fusion comp that runs the generated Lua in LuaJIT, **not yet against a live Resolve**. Check them with `inspect_fusion` or the Fusion page.
 - **Speed:** Fusion mode changes video timing inside the clip, not timeline duration or linked audio. Resetting to 1× neutralizes only the updated bridge's own node; user-created and older untagged TimeSpeed nodes are left alone. Reverse mapping is not verified and is rejected. Clip-attributes mode changes **all uses of that media**, multiplying its current source FPS; it is not a per-clip reset or speed ramp.
 - **Validation:** Automated tests cover mocked Resolve operations, source decoding and MCP responses. They do not certify every operation on every Free-version build or platform. See [testing guidance](docs/TESTING.md) for the manual integration checklist.
 
@@ -282,7 +287,7 @@ Console requests carry a unique ID, deadline, worker session and the project/tim
 
 The heartbeat reports `busy`, `state` (`running`, `completed`, `failed`, or initial `idle`) and `request_id`. Its reporting thread makes no Resolve API calls; project/timeline details are cached during jobs. A fresh heartbeat proves the Python reporter is alive, not that a native operation is making progress. A native call holding Python's GIL may still prevent heartbeat updates.
 
-A client timeout stops waiting; it **does not confirm cancellation**. Queued requests expire before execution, but active native work can finish later. Inspect `~/.resolve-ai-bridge/requests/<request-id>.json` and the timeline before attempting another edit. Completed/failed records retain results; a surviving `running` record after a crash means an unknown outcome and prevents replay of that ID. This is duplicate suppression, not an exactly-once guarantee. Records persist until manually removed with workers/clients stopped; removing them removes duplicate protection. A newly submitted request has a new ID.
+A client timeout stops waiting; it **does not confirm cancellation**. Queued requests expire before execution, but active native work can finish later. Inspect `~/.resolve-ai-bridge/requests/<request-id>.json` and the timeline before attempting another edit. Completed/failed records retain results; a surviving `running` record after a crash means an unknown outcome and prevents replay of that ID. This is duplicate suppression, not an exactly-once guarantee. The worker cleans up on its own: completed/failed records after 7 days, `running` records after 30 days, unread replies after an hour, and it rotates its log at 1 MB. A newly submitted request has a new ID.
 
 Direct attach falls back to Console only before dispatch. Unexpected exceptions after dispatch report an unknown outcome without replay. UI switches during native execution cannot be locked out: keep the intended project/timeline open while edits run. Context validation catches mismatches immediately before execution, not switches away and back between observations.
 
@@ -309,7 +314,7 @@ npm ci
 npm run build
 ```
 
-The package check creates and inspects a temporary npm tarball; it does not publish. CI tests Python on macOS, Windows and Linux and checks website/package builds. Maintainers: see [release instructions](docs/RELEASING.md).
+The package check creates and inspects a temporary npm tarball; it does not publish. There is no hosted CI yet, so run these checks locally before a release. Install the optional `lupa` package (`python3 -m pip install lupa`) to run the Fusion Lua tests too; without it they are skipped. Maintainers: see [release instructions](docs/RELEASING.md).
 
 </details>
 
