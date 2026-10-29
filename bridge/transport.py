@@ -1,6 +1,6 @@
 """Pick the best available route into DaVinci Resolve.
 
-Two transports exist and they behave identically from the MCP server's point of
+Three transports exist and they behave identically from the MCP server's point of
 view:
 
 ``direct``
@@ -11,17 +11,20 @@ view:
 ``console``
     The authenticated file queue in ``~/.resolve-ai-bridge``. A small worker
     started from Resolve's own Console (or the Workspace > Scripts menu) does
-    the work on Python-enabled builds. Resolve Free 21.1+ removed Python
-    scripting; this release does not support Free 21.1.2.
+    the work on Python-enabled builds.
 
-Set ``RESOLVE_AI_BRIDGE_MODE`` to ``direct``, ``console``, or ``auto``
+``lua``
+    Python runs the shared operations outside Resolve. An authenticated Lua
+    worker uses native Fusion file APIs to call Resolve, including Free 21.1.2.
+
+Set ``RESOLVE_AI_BRIDGE_MODE`` to ``direct``, ``console``, ``lua`` or ``auto``
 (default) to override the choice.
 """
 
 import os
 import time
 
-from bridge import client, direct
+from bridge import client, direct, lua_transport
 from bridge.operations import OperationError, ResolveOperations
 
 
@@ -32,7 +35,7 @@ _state = {"ops": None, "last_probe": 0.0}
 
 def mode():
     value = os.environ.get("RESOLVE_AI_BRIDGE_MODE", "auto").strip().lower()
-    return value if value in ("auto", "direct", "console", "queue") else "auto"
+    return value if value in ("auto", "direct", "console", "queue", "lua") else "auto"
 
 
 def _token_id():
@@ -46,7 +49,7 @@ def _token_id():
 
 def direct_operations(force=False):
     """Return a ready ``ResolveOperations`` bound to a live Resolve, or None."""
-    if mode() in ("console", "queue"):
+    if mode() in ("console", "queue", "lua"):
         return None
 
     if _state["ops"] is not None:
@@ -69,9 +72,11 @@ def direct_operations(force=False):
 
 
 def describe():
-    """Report both transports for resolve_status and the doctor check."""
+    """Report available transports for resolve_status and the doctor check."""
     selected_mode = mode()
-    probe = direct.probe() if selected_mode not in ("console", "queue") else {
+    lua = lua_transport.probe()
+    use_lua = selected_mode == "lua" or (selected_mode == "auto" and lua.get("connected"))
+    probe = direct.probe() if selected_mode not in ("console", "queue", "lua") and not use_lua else {
         "ok": False,
         "loadable": False,
         "reason": "Direct attach disabled by RESOLVE_AI_BRIDGE_MODE=%s." % selected_mode,
@@ -88,12 +93,17 @@ def describe():
             "request_id": (console or {}).get("request_id"),
             "heartbeat_age_seconds": (console or {}).get("heartbeat_age_seconds"),
         },
-        "active": "direct" if probe.get("ok") else ("console" if console else "none"),
+        "lua_worker": lua,
+        "active": "lua" if use_lua and lua.get("connected") else
+                  ("direct" if probe.get("ok") else ("console" if console and not use_lua else "none")),
     }
 
 
 def call(operation, params=None, timeout=30.0):
     """Run one operation over whichever transport is available."""
+    if mode() == "lua" or (mode() == "auto" and lua_transport.probe().get("connected")):
+        # Never fall through after Lua dispatch: an uncertain edit is not replayed.
+        return lua_transport.call(operation, params or {}, timeout=timeout), "lua"
     try:
         operations = direct_operations()
     except Exception:  # No dispatch has started, so Console fallback is safe.
@@ -124,6 +134,6 @@ def offline_help():
         "Resolve is not reachable. %s Open DaVinci Resolve with a project. If tools still fail, "
         "start the worker from Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, or paste "
         "the line in ~/.resolve-ai-bridge/console-command.txt into Workspace > Console (Py3)."
-        " Resolve Free 21.1+ removed Python scripting; Free 21.1.2 is unsupported by this release."
+        " On Free 21.1+, choose Start AI Bridge (Lua), or use lua-console-command.txt in the Lua Console."
         % reason
     )

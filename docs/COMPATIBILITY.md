@@ -1,23 +1,62 @@
 # Resolve compatibility
 
-## Free 21.1.2 is unsupported by v1.13.1
+## Current Free: native-file Lua connector (v1.14.0)
 
-Live checked on macOS, **DaVinci Resolve Free 21.1.2.10**, on 2026-10-28:
+Live-tested on **macOS DaVinci Resolve Free 21.1.2.10**, 2026-10-29,
+using synthetic media in a separate disposable project library.
 
-- Python Console/menu startup is unavailable. Blackmagic moved Python scripting
-  to Studio in [21.1's release notes](https://www.blackmagicdesign.com/support/readme/59dd4eef1f4941c29fb8dc48b33f5c87).
-- The Lua Console still evaluates Lua 5.1, and ordinary Resolve API inspection
-  succeeds. A disposable Lua menu script also creates a timeline and marker.
-- Both Console and menu environments report `dofile`, `loadfile`, `require`,
-  `io`, `package` and FFI unavailable. The native ZipFile wrapper also fails
-  when it attempts to use FFI.
-- The investigated loopback Lua connector requires those facilities and cannot
-  start on this build. It is excluded from the stable package. No automated
-  connection to current Free is claimed.
+The existing Python route is unavailable inside this Free build. Lua still
+runs the ordinary Resolve and Fusion APIs. Its `io`, `dofile`, `loadfile`,
+`require`, `package` and FFI facilities are absent, so the earlier socket/FFI
+prototype could not start. That failure did not establish that all Lua
+connectors were impossible.
 
-Earlier upstream Lua-bridge reports concerned other builds; a passing simulation
-or an upstream report does not establish compatibility with Free 21.1.2.
-Reinstalling Python does not restore the missing interpreter inside Resolve.
+**The replacement uses native Fusion `OpenFile` and native script contexts.**
+Live probes read and wrote files on Free 21.1.2.10. These host methods are
+covered in Blackmagic's [Fusion scripting reference](https://documents.blackmagicdesign.com/UserManuals/Fusion8_Scripting_Guide.pdf).
+The connector loads its own bundled modules through the native file reader.
+There is no socket, FFI, embedded Python dependency or binary modification.
+Python runs the existing `bridge/operations.py` outside Resolve and calls
+session-scoped native objects over signed local file messages.
+
+### Measured behavior
+
+- A full 37-operation native-file editing run passed: AV import retained audio
+  and all 192 frames; preview/original isolation, transforms, image IDs, source
+  frame/audio decoding, timeline comparison and split checkpoints passed.
+- Animated zoom including moving center, masked blur, spotlight, saturation,
+  color effects, speed changes/reset and resets of all five effects passed.
+- A separate 16-check stereo/silence workflow passed, including accepted cuts
+  on a duplicate, numeric marker positions and stale-review refusal.
+- Installer staging and a custom runtime home containing spaces passed.
+- Native menu startup after app restart, repeated Start retaining one session,
+  menu Stop staying stopped, stale-session Stop refusal and Stop waiting for
+  the complete active operation passed. Console startup was also checked.
+- Requests/replies use HMAC-SHA256, session checks, deadlines, nonce replay
+  protection, bounded handles and a cross-process lock for complete operations.
+  Lost replies halt further dispatch and are recorded as unknown; an edit is
+  never automatically replayed through Python or another transport.
+- Native IPC slots retain their pre-created POSIX 0600 permissions inside the
+  private 0700 runtime. Partial file reads are retried without resending edits.
+
+The same public MCP tools and shared operation implementation are retained.
+This restores the tested editing workflows on current Free; it does not unlock
+Studio-only AI/effects or promise every API on every platform/build.
+
+### Remaining limits
+
+Live current-Free validation covers macOS only. Windows/Linux native Resolve,
+Studio, render completion and large timelines remain unverified. Native render
+calls and uncommon tool paths still need manual checks. Still images may use
+Resolve's default duration rather than the requested one; replies report the
+actual result. Source frame/audio decoding excludes timeline compositing and
+Fairlight processing. Existing reconstruction/metadata limitations still apply.
+
+## v1.13.1 historical result
+
+That release excluded the failed socket/FFI Lua prototype and accurately
+reported Free 21.1.2 unsupported by its shipped connector. Upgrade to v1.14.0
+and use **Start AI Bridge (Lua)**. Reinstalling Python alone cannot restore Py3.
 
 ## Free 21.0.3.7
 

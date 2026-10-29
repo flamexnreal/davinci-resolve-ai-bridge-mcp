@@ -149,6 +149,8 @@ def main():
     )
     result((HOME / "bridge" / "lifecycle.py").exists(), "Installed worker lifecycle",
            str(HOME / "bridge" / "lifecycle.py"))
+    result((HOME / "ResolveLua.lua").is_file() and (HOME / "lua" / "rpc.lua").is_file(),
+           "Installed Lua worker", "native Fusion file transport")
     result(venv_python().exists(), "Private Python", str(venv_python()))
     check_menu_scripts()
 
@@ -191,7 +193,13 @@ def main():
         config_detail = str(exc)
     result(config_ok, "MCP configuration", config_detail)
 
-    direct = {} if args.offline else (check_direct_attach() or {})
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from bridge import lua_transport
+    lua = lua_transport.probe(HOME)
+    lua_online = bool(lua.get("connected"))
+    result(lua_online, "Lua worker", ("Resolve " + lua.get("resolve_version", "")) if lua_online else "not running", warning=True)
+    direct = {} if args.offline or lua_online else (check_direct_attach() or {})
 
     heartbeat_path = HOME / "agent.json"
     heartbeat = None
@@ -216,7 +224,7 @@ def main():
 
     if args.offline:
         result(True, "Round trip to Resolve", "skipped by --offline; no native or queue calls")
-    elif direct.get("ok") or console_online:
+    elif direct.get("ok") or console_online or lua_online:
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
         try:
@@ -241,7 +249,7 @@ def main():
     print("\nSummary: %d failure(s), %d warning(s)" % (failures, warnings))
     if failures:
         print("Open README.md and follow the Help section in order.")
-    elif not (direct.get("ok") or console_online):
+    elif not (direct.get("ok") or console_online or lua_online):
         print("Local files are healthy. Open DaVinci Resolve with a project, then run this again.")
     else:
         print("The bridge is installed and Resolve is reachable.")

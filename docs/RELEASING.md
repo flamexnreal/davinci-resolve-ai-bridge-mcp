@@ -3,7 +3,7 @@
 Publishing is a separate maintainer action. Local tests, installation and package checks never publish.
 
 1. Review the complete diff and run the checks in TESTING.md. Complete the manual Resolve Free checklist before claiming live compatibility.
-2. Choose the next unused version after checking npm and GitHub tags. Keep `package.json`, `package-lock.json`, `pyproject.toml` and `bridge/operations.py:AGENT_VERSION` synchronized. The installer imports that constant; it has no separate version to bump.
+2. Choose the next unused version after checking npm and GitHub tags. Keep `package.json`, `package-lock.json`, `pyproject.toml`, `bridge/operations.py:AGENT_VERSION` and `agent/lua/rpc.lua:VERSION` synchronized. The installer imports the Python constant; it has no separate version to bump.
 3. Turn the top **Unreleased** section in RELEASE_NOTES.md into the selected release/version/date. Keep the documented limitations and validation evidence.
 4. Run `npm ci`, `npm run build`, `python3 -m unittest discover -s tests -v`, and `node tools/check-package.mjs`. Inspect the actual tarball via the check. The npm payload must contain requirements.txt and every bridge/agent file it needs.
 5. Review `git diff --check` and `git status`. Exclude private tokens, installed runtimes, temporary audio/images, dependency folders and local configuration backups.

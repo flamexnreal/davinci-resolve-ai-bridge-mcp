@@ -9,6 +9,8 @@ type Provider = "Antigravity" | "Claude Code" | "Codex" | "Cursor";
 // correct for every user on macOS, Windows, and Linux. Nothing to substitute.
 const consoleCommand =
   'import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())';
+const luaConsoleCommand =
+  'if fusion:GetData("ResolveAIBridge.NativeApp")~=tostring(fusion) then fusion:RunScript((os.getenv("RESOLVE_AI_BRIDGE_HOME") or ((os.getenv("USERPROFILE") or os.getenv("HOME")).."/.resolve-ai-bridge")).."/ResolveLua.lua") end';
 
 const installCommands: Record<OS, string> = {
   mac: "python3 install.py",
@@ -91,11 +93,11 @@ const faq = [
   },
   {
     q: "Do I have to redo a step every time I open Resolve?",
-    a: "On Python-enabled builds, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. Startup is verified on macOS Free 21.0.3.7. Free 21.1+ removed Python scripting, and this release does not support Free 21.1.2.",
+    a: "On Free 21.1+, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (Lua). Native-file Lua startup and editing are verified on macOS Free 21.1.2.10. Python-enabled builds and Studio retain the existing worker.",
   },
   {
     q: "Does this work on free DaVinci Resolve?",
-    a: "It supports Python-enabled Free builds, with startup verified on macOS Free 21.0.3.7. This release does not support Free 21.1.2: live testing also found the investigated Lua connector could not start there. Review tools use ordinary APIs; Studio-only features stay unavailable on Free.",
+    a: "Yes. The native-file Lua connector works on the tested macOS Free 21.1.2.10 build without Python inside Resolve. Older Python-enabled Free builds remain supported. Studio-only features stay unavailable on Free; live Windows/Linux checks are still needed.",
   },
   {
     q: "Why did my image only last one frame?",
@@ -237,13 +239,13 @@ export default function App() {
 
       <section id="how" className="page-section py-24 sm:py-32">
         <Reveal>
-          <SectionIntro number="00 / Read this first" title="One bridge. Two ways in." text="Nothing is uploaded to a bridge service. Resolve, the file queue, and your AI client's MCP process all stay on your computer." />
+          <SectionIntro number="00 / Read this first" title="One bridge. Free and Studio." text="Nothing is uploaded to a bridge service. Resolve, the file queue, and your AI client's MCP process all stay on your computer." />
         </Reveal>
         <Reveal className="mt-16 grid gap-0 border-y border-slate-300 md:grid-cols-3">
           {[
             ["01", "MCP server", "Gives your AI a focused set of editing tools and returns Resolve's real answer, never a guess."],
-            ["02a", "Direct attach", "The default. The MCP process talks to the open Resolve through Blackmagic's own scripting library, so nothing has to be started inside Resolve."],
-            ["02b", "Console worker", "The fallback. A menu-started worker reads token-protected JSON from ~/.resolve-ai-bridge. No network port is opened."],
+            ["02a", "Current Resolve Free", "Choose Start AI Bridge (Lua) once per session. It uses signed local file messages and works on the tested macOS Free 21.1.2.10 build."],
+            ["02b", "Studio and older builds", "Studio can attach through Blackmagic's scripting library. Python-enabled builds also keep the existing Start AI Bridge worker."],
           ].map(([n, title, text], i) => (
             <div key={title} className={`py-8 md:px-8 ${i > 0 ? "border-t border-slate-300 md:border-l md:border-t-0" : ""}`}>
               <span className="font-mono text-xs text-blue-700">{n}</span>
@@ -254,7 +256,7 @@ export default function App() {
         </Reveal>
         <Reveal className="mt-10 flex items-start gap-4 bg-[#e8edf5] px-5 py-5 sm:px-7">
           <Icon name="help" className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
-          <p className="max-w-4xl text-sm leading-6 text-slate-700"><strong>Check your Free version:</strong> startup is verified on macOS Free 21.0.3.7. Free 21.1+ removed Python scripting. This release does not support Free 21.1.2; the investigated Lua connector also failed to start on that build. Reinstalling Python will not restore the missing Py3 tab. See the <a className="underline" href="https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/blob/main/docs/COMPATIBILITY.md">compatibility evidence</a>.</p>
+          <p className="max-w-4xl text-sm leading-6 text-slate-700"><strong>Current Free support:</strong> the native-file Lua connector is live-tested on macOS Free 21.1.2.10. Choose Start AI Bridge (Lua); Python stays in the external MCP server. The older Python worker remains available on Python-enabled builds. See the <a className="underline" href="https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/blob/main/docs/COMPATIBILITY.md">compatibility evidence</a>.</p>
         </Reveal>
       </section>
 
@@ -277,7 +279,7 @@ export default function App() {
             </div>
             <div className="max-w-3xl">
               <ol className="divide-y divide-slate-200 border-y border-slate-200">
-                <li className="step-row"><span>1</span><div><h3>Download and keep the whole folder</h3><p>On GitHub choose Code, then Download ZIP. Extract it. Open <strong>00_START_HERE.html</strong> first. The installer needs the agent and bridge folders beside it.</p></div></li>
+                <li className="step-row"><span>1</span><div><h3>Download and keep the whole folder</h3><p>On GitHub choose Code, then Download ZIP. Extract it and read <strong>README.md</strong>. The installer needs the agent and bridge folders beside it.</p></div></li>
                 <li className="step-row"><span>2</span><div><h3>Open a normal terminal in that folder</h3><p>On macOS, Control-click the folder and use New Terminal at Folder. On Windows, open the folder, click the address bar, type <code>powershell</code>, and press Enter.</p></div></li>
                 <li className="step-row"><span>3</span><div><h3>Run the installer</h3><p>It creates a private runtime at <code>~/.resolve-ai-bridge</code>, a Python virtual environment, a persistent token, a filled MCP configuration, and the one-click Resolve menu entries.</p></div></li>
                 <li className="step-row"><span>4</span><div><h3>Restart DaVinci Resolve once</h3><p>Resolve only looks for new Workspace &gt; Scripts entries while it starts up. After this single restart the launcher is permanent.</p></div></li>
@@ -291,13 +293,13 @@ export default function App() {
 
       <section id="connect" className="page-section py-24 sm:py-32">
         <Reveal>
-          <SectionIntro number="02 / Start Resolve" title="Open Resolve. That is normally the whole step." text="This version attaches to the running Resolve by itself. Nothing to edit, no user name to replace, and nothing to redo every time you launch the app. Two fallbacks are installed for you in case your Resolve build refuses a direct attach." />
+          <SectionIntro number="02 / Start Resolve" title="Open your project. Start the bridge." text="On current Free, choose the Lua launcher once per Resolve session. Studio and Python-enabled builds retain their existing connection routes. No user name or token needs to be entered." />
         </Reveal>
         <Reveal className="mt-16 grid gap-0 border-y border-slate-300 md:grid-cols-3">
           {[
-            ["Route 1 - default", "Just open Resolve", "Open Resolve and your project. The MCP server finds it. To switch the bridge off, disconnect or disable the MCP server in your AI client."],
-            ["Route 2 - one-click start", "Workspace > Scripts", "Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge. The worker starts directly; confirm with resolve_status. No Console paste is needed on the tested macOS Free 21.0.3.7 build."],
-            ["Route 3 - fallback", "One portable line", "Paste the line below into Workspace > Console with the Py3 tab selected. It is the same text on every computer."],
+            ["Current Free", "Start AI Bridge (Lua)", "Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (Lua). Confirm with resolve_status. The native Lua route needs no Python interpreter inside Resolve."],
+            ["Studio / Python builds", "Direct attach or Python", "Studio can connect directly when local external scripting is enabled. Otherwise, choose Start AI Bridge on a Python-enabled build."],
+            ["Console fallback", "Choose the right language", "Use the Lua line below on Free 21.1+, or the Py3 line on Python-enabled builds. Both expand your home folder automatically."],
           ].map(([n, title, text], i) => (
             <div key={title} className={`py-8 md:px-8 ${i > 0 ? "border-t border-slate-300 md:border-l md:border-t-0" : ""}`}>
               <span className="font-mono text-xs text-blue-700">{n}</span>
@@ -309,13 +311,14 @@ export default function App() {
         <Reveal className="mt-14 section-grid">
           <div className="space-y-3 text-sm leading-6 text-slate-600">
             <p className="section-number">Nothing to personalise</p>
-            <p>The old guide asked you to replace <code>YOUR_NAME</code> by hand. That step is gone. Python expands <code>~</code> to your own home folder inside Resolve, so this exact text is correct for every user on macOS, Windows, and Linux.</p>
-            <p>Saved for you at <code>~/.resolve-ai-bridge/console-command.txt</code>.</p>
+            <p>The installer prepares the runtime and launchers. The fallback lines find your home folder automatically. For a custom runtime folder, use its installed menu entry.</p>
+            <p>Saved in <code>~/.resolve-ai-bridge</code> as <code>lua-console-command.txt</code> and <code>console-command.txt</code>.</p>
           </div>
           <div className="min-w-0 max-w-3xl">
-            <CopyBlock code={consoleCommand} label="Resolve Python 3 Console - identical on macOS and Windows" />
+            <CopyBlock code={luaConsoleCommand} label="Current Free: Workspace > Console > Lua" />
+            <div className="mt-5"><CopyBlock code={consoleCommand} label="Python-enabled builds: Workspace > Console > Py3" /></div>
             <div className="mt-5 border-l-2 border-blue-700 pl-5 text-sm leading-6 text-slate-600">
-              <p>The menu worker keeps a separate script process alive while Resolve remains usable. The Console fallback returns after a short startup handshake. Stop it from <strong>Workspace &gt; Scripts &gt; Resolve AI Bridge &gt; Stop AI Bridge</strong>, or quit Resolve.</p>
+              <p>Stop the Lua worker with <strong>Stop AI Bridge (Lua)</strong>, or the Python worker with <strong>Stop AI Bridge</strong>. Stop waits for the current complete operation; it does not cancel an edit already running.</p>
             </div>
           </div>
         </Reveal>

@@ -4,12 +4,18 @@ Run `python3 tools/doctor.py` on macOS or `py tools/doctor.py` on Windows before
 
 ## Resolve Free 21.1+ has no Py3 tab
 
-Python scripting moved to Studio in 21.1. This release does **not** support
-Free 21.1.2. Live macOS testing on Free 21.1.2.10 also found that the investigated
-Lua connector could not load: both Console and menu scripts lacked `dofile`,
-`loadfile` and FFI. Installing Python again or enabling external access does not
-repair that restriction. Startup is verified on Free 21.0.3.7; see
-[compatibility evidence](COMPATIBILITY.md) before changing Resolve versions.
+Use **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (Lua)**.
+The native-file Lua connector is live-tested on macOS Free **21.1.2.10**.
+It uses Fusion's `OpenFile` and `RunScript` APIs instead of `dofile`, `io` or
+FFI. Python runs only in the external MCP server. Reinstalling Python will not
+restore the missing Py3 tab. Reinstall the bridge, restart Resolve, and refresh
+your MCP server after upgrading from v1.13.1.
+
+For Console fallback, select **Lua** and use `lua-console-command.txt` from the
+runtime. Use **Stop AI Bridge (Lua)** to stop it after active work finishes.
+Custom runtime folders work through their installed menu entries; the portable
+Console line uses the default home unless Resolve has `RESOLVE_AI_BRIDGE_HOME` set.
+See [compatibility evidence](COMPATIBILITY.md) for measured scope and limitations.
 
 ## The One-Line Installer Downloads but Stops
 
@@ -26,9 +32,9 @@ In this order:
 1. Open DaVinci Resolve with a project.
 2. Run doctor and read the **Direct attach to Resolve** line.
 3. If it says the library loads but Resolve did not answer, check **Preferences > System > General > External scripting using**. For external scripting, **Local** is the normal setting. Resolve Free users should use Start AI Bridge without enabling external access.
-4. If direct attach is unavailable on your build, use **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge**. It starts the worker directly; no paste is normally needed. Confirm with `resolve_status`.
+4. If direct attach is unavailable, use **Start AI Bridge (Lua)** on Free 21.1+, or **Start AI Bridge** on Python-enabled builds. Confirm with `resolve_status`.
 5. If that menu is missing, run the installer again and restart Resolve once. Resolve only scans for new menu scripts while it starts up.
-6. As a last resort, paste the line in `~/.resolve-ai-bridge/console-command.txt` into **Workspace > Console** with the **Py3** tab selected.
+6. As a fallback, use `lua-console-command.txt` in the **Lua** Console, or `console-command.txt` in **Py3** on Python-enabled builds.
 
 ## The Workspace > Scripts Menu Entry Is Missing
 

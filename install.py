@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 from bridge.operations import AGENT_VERSION as VERSION
-from bridge.lifecycle import WorkerLock, load_token, replace_token, private_directory
+from bridge.lifecycle import WorkerLock, load_token, replace_token, private_directory, atomic_json
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 TOKEN_FILE = HOME / "token.txt"
@@ -37,6 +37,9 @@ CONSOLE_LINE = (
     'import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),'
     'encoding="utf-8").read())'
 )
+LUA_CONSOLE_LINE = ('if fusion:GetData("ResolveAIBridge.NativeApp")~=tostring(fusion) then fusion:RunScript((os.getenv("RESOLVE_AI_BRIDGE_HOME") or '
+                    '((os.getenv("USERPROFILE") or os.getenv("HOME")).."/.resolve-ai-bridge"))'
+                    '.."/ResolveLua.lua") end')
 
 
 def fail(message):
@@ -52,7 +55,7 @@ def venv_python():
 # --------------------------------------------------------------- runtime copy
 
 
-def copy_runtime():
+def copy_runtime(runtime_home=None):
     """Copy into a staging directory, never remove a working bridge."""
     private_directory(HOME)
     for folder in ("inbox", "outbox", "logs"):
@@ -60,6 +63,15 @@ def copy_runtime():
     shutil.copy2(ROOT / "agent" / "ResolveConsole.py", HOME / "ResolveConsole.py")
     shutil.copytree(ROOT / "bridge", HOME / "bridge",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
+    shutil.copytree(ROOT / "agent" / "lua", HOME / "lua")
+    active_home = Path(runtime_home or HOME).expanduser().absolute()
+    source = (ROOT / "agent" / "ResolveLua.lua").read_text(encoding="utf-8")
+    for name, action in (("ResolveLua.lua", "start"), ("StopLua.lua", "stop"), ("StatusLua.lua", "status")):
+        header = "local BRIDGE_HOME = %s\nlocal BRIDGE_ACTION = %s\n" % (
+            json.dumps(str(active_home), ensure_ascii=False), json.dumps(action))
+        (HOME / name).write_text(header + source, encoding="utf-8")
+    for name in ("lua-inbox.json", "lua-outbox.json", "lua-agent.json", "lua-stop.json"):
+        atomic_json(HOME / name, {})
     for source in [HOME / "ResolveConsole.py", * (HOME / "bridge").glob("*.py")]:
         compile(source.read_text(encoding="utf-8"), str(source), "exec")
     for name in ("operations.py", "server.py", "client.py", "transport.py", "lifecycle.py"):
@@ -76,6 +88,9 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
     global HOME
     destination = HOME
     heartbeat = destination / "agent.json"
+    from bridge import lua_transport
+    if lua_transport.probe(destination).get("connected"):
+        fail("Stop the Lua worker and MCP clients before updating this runtime.")
     if heartbeat.exists():
         try:
             active = time.time() - float(json.loads(heartbeat.read_text())["time"]) < 25
@@ -92,6 +107,7 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
         fail("Another install may be running. If it stopped, remove %s and retry." % lock)
     stage = None
     worker_lock = None
+    lua_operation_lock = None
     try:
         if not destination.exists() and previous.exists():
             os.replace(previous, destination)
@@ -99,9 +115,12 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
             worker_lock = WorkerLock(destination)
             if not worker_lock.acquire():
                 fail("Stop the running bridge worker before updating this runtime.")
+            lua_operation_lock = WorkerLock(destination.with_name(destination.name + ".lua-operation"))
+            if not lua_operation_lock.acquire():
+                fail("Wait for the active Lua operation and stop its worker before updating.")
         stage = Path(tempfile.mkdtemp(prefix=destination.name + ".stage-", dir=destination.parent))
         HOME = stage
-        copy_runtime()
+        copy_runtime(runtime_home=destination)
         if (destination / ".venv").is_dir():
             shutil.copytree(destination / ".venv", stage / ".venv", symlinks=True)
         install_dependencies(skip=skip)
@@ -115,7 +134,9 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
         # stopped clients: copying a live queue cannot be made transactional.
         if destination.exists():
             for item in destination.iterdir():
-                if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json", "worker.lock", "stop.json"}:
+                if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json", "worker.lock", "stop.json",
+                                     "lua", "ResolveLua.lua", "StopLua.lua", "StatusLua.lua", "lua-inbox.json",
+                                     "lua-outbox.json", "lua-agent.json", "lua-stop.json"}:
                     if with_ffmpeg and item.name == "ffmpeg-path.txt":
                         continue
                     target = stage / item.name
@@ -139,6 +160,8 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
             shutil.rmtree(stage)
         if worker_lock is not None:
             worker_lock.release()
+        if lua_operation_lock is not None:
+            lua_operation_lock.release()
         lock.rmdir()
 
 
@@ -197,6 +220,7 @@ def write_configs(token=None):
     # Resolve's own interpreter, so there is never a user name to substitute
     # and the same text works on macOS, Windows, and Linux.
     (HOME / "console-command.txt").write_text(CONSOLE_LINE + "\n", encoding="utf-8")
+    (HOME / "lua-console-command.txt").write_text(LUA_CONSOLE_LINE + "\n", encoding="utf-8")
 
     if os.name == "nt":
         claude_line = (
@@ -316,8 +340,13 @@ def install_menu_scripts():
         folder = root / "Utility" / MENU_FOLDER
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            for script in sorted(source.glob("*.py")):
-                shutil.copy2(script, folder / script.name)
+            for script in sorted(source.iterdir()):
+                if script.suffix == ".py":
+                    shutil.copy2(script, folder / script.name)
+                elif script.suffix == ".lua":
+                    content = script.read_text(encoding="utf-8").replace(
+                        "__BRIDGE_HOME__", json.dumps(str(HOME.absolute()), ensure_ascii=False))
+                    (folder / script.name).write_text(content, encoding="utf-8")
             installed.append(str(folder))
         except OSError:
             continue
@@ -591,8 +620,8 @@ def main():
     print("\nResolve AI Bridge installer %s" % VERSION)
     print("Runtime: %s" % HOME)
     print("System:  %s %s\n" % (platform.system(), platform.release()))
-    print("Compatibility: Python startup is verified on macOS Resolve Free 21.0.3.7.")
-    print("Resolve Free 21.1+ removed Python scripting; this release does not support Free 21.1.2.\n")
+    print("Free 21.1+: use Start AI Bridge (Lua); Python runs only in the external MCP server.")
+    print("Python startup remains available on Python-enabled builds and Studio.\n")
 
     prepare_runtime(skip=args.skip_deps, with_ffmpeg=args.with_ffmpeg)
     print("[0/5] Activated validated runtime; previous installation retained.")
@@ -662,6 +691,7 @@ def main():
         print("\nSTEP 3  Start the bridge in Resolve (Free or Studio):")
         print("        Restart DaVinci Resolve once, then choose")
         print("        Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.")
+        print("        On Free 21.1+, choose Start AI Bridge (Lua) in that folder.")
         print("        It starts the worker directly; no Console paste is needed on supported builds.")
         for path in menu_paths:
             print("          %s" % path)
@@ -669,6 +699,7 @@ def main():
     print("\n        Fallback Console command (Workspace > Console, Py3 tab):")
     print("          %s" % CONSOLE_LINE)
     print("        The same line is saved at %s" % (HOME / "console-command.txt"))
+    print("        Free 21.1+ Lua fallback (Lua Console): %s" % LUA_CONSOLE_LINE)
 
     print("\nVERIFY  python3 tools/doctor.py")
     print("        Then ask your AI: \"Call resolve_status and tell me what is open.\"")

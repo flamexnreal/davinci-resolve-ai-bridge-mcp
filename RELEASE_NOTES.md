@@ -1,5 +1,49 @@
 # Release Notes
 
+## v1.14.0 — Restore current Resolve Free workflows with native Lua (2026-10-29)
+
+Free 21.1+ removed Python inside Resolve. The new Lua connector restores the
+existing bridge editing workflows through native Fusion file APIs, with Python
+running the shared operations outside Resolve. Live-tested on **macOS Free
+21.1.2.10**. Choose **Workspace > Scripts > Resolve AI Bridge > Start AI Bridge
+(Lua)** after installing and restarting Resolve, then refresh the MCP server.
+
+- Added native file RPC without Lua io, dofile, require, sockets or FFI.
+- Kept the existing public tools and shared editing logic, including Fusion
+  effects/animation and resets. Existing Python and Studio routes are retained.
+- Added Lua Start, Status and Stop menu entries plus a portable Console fallback.
+  Direct menu loading avoids queuing a second start behind the resident worker.
+- Added signed requests/replies/heartbeats, sessions, nonce replay protection,
+  deadlines, bounded object handles and complete-operation leases/OS locking.
+  Stop waits for active work. Uncertain replies halt dispatch with a durable
+  unknown record, and are never automatically replayed through another route.
+- Installer staging bundles the native Lua modules and MIT attribution, fixes
+  runtime paths across activation and prepares private IPC slots. Native file
+  reads handle partial writes without resending edits.
+- Added actual Lua 5.1 protocol/authentication regressions and Python transport,
+  staging, torn-file and no-replay checks. Updated setup and compatibility docs.
+
+### Validation and limits
+
+37-operation editing and 16-check stereo/silence workflows passed live on
+macOS Free 21.1.2.10 with synthetic media in an isolated library. This includes
+full AV duration/audio, image IDs, preview isolation, split checkpoints, source
+image/audio, five Fusion effects, speed/reset and all effect resets. Installer
+staging, restart/menu startup, repeated Start, authenticated/session-bound Stop,
+and waiting for a complete operation were also verified.
+
+143 automated tests ran locally: 137 passed and 6 PowerShell cases skipped.
+Lua RPC tests used an actual Lua 5.1 interpreter. Build, TypeScript, npm audit
+(zero findings), the 40-file package check and the archive-installed CLI's
+actual MCP handshake/46-tool listing/source-image response passed. Doctor
+reported zero failures with Lua connected (Python worker stopped).
+
+The native connector restores the measured Free workflows. Studio-only
+features remain unavailable. Live Windows/Linux Resolve, Studio, render
+completion, uncommon APIs and large timelines are not certified. Source
+images/audio are source-only. Still-image duration and reconstruction metadata
+limits remain as documented in [COMPATIBILITY.md](docs/COMPATIBILITY.md).
+
 ## v1.13.1 — Editing and installer fixes; Free compatibility notice (2026-10-29)
 
 Positioned AV imports retain their audio, image insertion returns the actual

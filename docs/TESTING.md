@@ -1,11 +1,18 @@
 # Testing
 
-## v1.13.1 compatibility checks
+## v1.14.0 current Free checks
 
-See [COMPATIBILITY.md](COMPATIBILITY.md) for the live macOS Free 21.1.2.10
-startup failure and the Free 21.0.3.7 editing investigation. The Lua prototype
-is excluded from the stable release. Do not infer current Free support from
-automated tests or from older build results.
+See [COMPATIBILITY.md](COMPATIBILITY.md) for live native-file Lua tests on macOS
+Free 21.1.2.10. The previous socket/FFI prototype failed; the native file API
+works without those libraries. The current connector keeps shared editing
+operations in Python outside Resolve. Automated tests alone do not establish
+compatibility on another Resolve build or platform.
+
+`tests/test_lua_transport.py` exercises the actual Lua RPC/authentication module
+in an optional Lua 5.1 interpreter, including HMAC vectors, invalid/replayed
+requests, sessions, leases, expired deadlines and explicit truncation. Python
+checks cover partial native file writes, private staged IPC slots, custom homes
+and refusal to replay a failed Lua dispatch through another transport.
 
 ## Automated checks
 
@@ -18,7 +25,7 @@ npm run build
 python3 tools/doctor.py
 ```
 
-The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. `tests/test_fusion.py` drives the Fusion effects against an in-memory comp; with the optional `lupa` package installed (`python3 -m pip install lupa`) it also runs every generated Lua script in LuaJIT, the Lua engine Fusion uses, and checks where the keyframes land. Without `lupa` those Lua cases skip. A simulated comp is not a live Fusion page. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets and Python cache files. Per-folder `.npmignore` rules keep caches out even after running tests.
+The standard-library unit tests use in-memory Resolve API doubles and synthetic PCM. `tests/test_fusion.py` drives the Fusion effects against an in-memory comp; with the optional `lupa` package installed (`python3 -m pip install lupa`) it also runs generated Lua and checks where the keyframes land. It prefers LuaJIT when that runtime is available and otherwise uses the Lua runtime bundled with lupa. Without `lupa` those Lua cases skip. A simulated comp is not a live Fusion page. MCP-specific tests use the actual installed MCP SDK, with an isolated bridge home. Tests never invoke live editing or publishing. The package check validates a real temporary tarball, including requirements.txt and excluding website runtime dependencies/assets and Python cache files. Per-folder `.npmignore` rules keep caches out even after running tests.
 
 The doctor is a separate installed-runtime diagnostic. It can make a read-only status round trip to Resolve. A missing/stopped Console worker is a runtime warning, not proof of a code failure.
 

@@ -11,18 +11,17 @@ Let your AI assistant help with the edit. Resolve AI Bridge connects Claude, Cod
 
 Inspect a timeline, place media, animate a zoom, adjust color, or try an edit on a duplicate timeline before touching the original.
 
-**Check your Resolve version before installing.** Python startup is verified on
-**macOS Resolve Free 21.0.3.7**. Blackmagic
-[moved Python scripting to Studio in 21.1](https://www.blackmagicdesign.com/support/readme/59dd4eef1f4941c29fb8dc48b33f5c87).
-**This release does not support Free 21.1.2.** Live testing on macOS Free
-21.1.2.10 also found that the investigated Lua connector could not start: the
-Console and Lua menu lack its required file-loading/FFI facilities. Reinstalling
-Python does not restore the missing Py3 tab. See [compatibility evidence](docs/COMPATIBILITY.md).
+**Current Resolve Free works through the Lua connector.** Native-file Lua
+startup and editing are live-tested on **macOS Free 21.1.2.10**. Python runs in
+the external MCP server; Resolve itself needs no Python, FFI or socket library.
+Choose **Start AI Bridge (Lua)** on Free 21.1+. The existing Python worker remains
+available on older Python-enabled Free builds and Studio. See
+[compatibility evidence and limits](docs/COMPATIBILITY.md).
 
 ### Built to stay light
 
-- **Works with Python-enabled Resolve Free builds.** Startup is verified on macOS Free 21.0.3.7; Free 21.1.2 is unsupported. Studio-only effects stay Studio-only.
-- **One click to start.** Choose **Start AI Bridge** in Resolve. Your AI gets the same tools and access as the old Console-paste workflow.
+- **Works with current Resolve Free.** Lua editing is verified on macOS Free 21.1.2.10; the older Python worker is verified on Free 21.0.3.7. Studio-only effects stay Studio-only.
+- **One click to start.** Choose **Start AI Bridge (Lua)** on current Free, or **Start AI Bridge** on Python-enabled builds. Your AI gets the existing editing tools.
 - **A small, local runtime.** No remote bridge server or manually entered token. Website dependencies stay out of the CLI package; FFmpeg and Remotion are optional.
 - **Keep your tokens for the edit.** The launcher starts locally, without an AI request or extra startup tools.
 
@@ -82,29 +81,35 @@ This optional download stays in the bridge's private Python environment. It is n
 ## Connect to Resolve
 
 1. Open **DaVinci Resolve** with a project.
-2. Choose **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge**. It may appear under **Utility**.
+2. Choose **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge (Lua)** on Free 21.1+. On Python-enabled builds, use **Start AI Bridge**. The folder may appear under **Utility**.
 3. Ask your AI: **“Call resolve_status, then bridge_capabilities and timeline_overview.”** Open or create a timeline before using timeline tools; status works without one.
 
-**Start from the menu and get editing.** Start once per Resolve session. You can see **RESOLVE AI BRIDGE READY** in **Workspace → Console**. Use **Stop AI Bridge** in the same menu to stop the worker; an active operation finishes first. Clicking Start again won't create another worker.
+**Start from the menu and get editing.** Start once per Resolve session. You can see **RESOLVE AI BRIDGE READY** in **Workspace → Console**. Use **Stop AI Bridge (Lua)** for the Lua worker or **Stop AI Bridge** for Python; an active operation finishes first. Clicking Start again won't create another worker.
 
 If the menu is missing after installation, quit and reopen Resolve once. Refresh/restart your AI client's MCP server after setup or a tool-schema update.
 
-Menu startup is live-tested on **macOS / Resolve Free 21.0.3.7 / Python 3.14.6**. The Py3 fallback requires a Python-enabled build. Free 21.1.2 is unsupported; Windows, Linux and other builds still need live verification.
+The Lua connector is live-tested on **macOS / Resolve Free 21.1.2.10**. Python startup remains verified on **Free 21.0.3.7 / Python 3.14.6**. Windows, Linux and other builds still need live verification.
 
 <br>
 
 <details>
 <summary>Console fallback and startup details</summary>
 
-If automatic startup reports an error on your build, open **Workspace → Console**, select **Py3**, paste this fallback command and press Enter:
+On **Free 21.1+**, open **Workspace → Console**, select **Lua**, paste this portable fallback and press Enter:
+
+```lua
+if fusion:GetData("ResolveAIBridge.NativeApp")~=tostring(fusion) then fusion:RunScript((os.getenv("RESOLVE_AI_BRIDGE_HOME") or ((os.getenv("USERPROFILE") or os.getenv("HOME")).."/.resolve-ai-bridge")).."/ResolveLua.lua") end
+```
+
+On Python-enabled builds, select **Py3** and use:
 
 ```python
 import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
 ```
 
-**Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. This does not establish Free 21.1+ support. Windows/Linux and other builds still need live verification.
+**Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. The separate native-file Lua connector supports the tested Free 21.1.2 build. Windows/Linux and other builds still need live verification.
 
-Resolve may keep the menu script marked busy while its separate `fuscript` process serves requests. Resolve's editing UI remains usable. Closing Resolve ends that process. The Console fallback uses a daemon worker with a startup handshake capped at one second. No new dependency, listening port, public MCP tool, or AI call is added.
+The Lua menu worker stays in its native script context and uses `bmd.wait` between requests, keeping the editing UI usable. The Python menu route keeps a separate `fuscript` process alive; its Py3 fallback starts a daemon worker and returns after a short handshake. The Lua worker uses signed local file messages, with no socket or FFI dependency. No public MCP tool or AI startup call is added.
 
 </details>
 
@@ -196,12 +201,12 @@ Fusion effects (`animate_zoom`, blur, spotlight, saturation, color fx) are the e
 <details>
 <summary>Tool compatibility and limitations</summary>
 
-- **Free edition:** The Console worker needs a Python-enabled Resolve build; this release does not support Free 21.1.2. Review workflows use ordinary timeline, marker and clip APIs. No Studio AI transcription, Magic Mask, Smart Reframe, or neural feature was added.
+- **Free edition:** Use the native-file Lua worker on Free 21.1+. It uses ordinary timeline, marker, clip and Fusion APIs and shares the existing Python editing implementation outside Resolve. No Studio AI transcription, Magic Mask, Smart Reframe, or neural feature was added.
 - **Frame images:** Source fallback shows decoded source media, **not** the graded/composited viewer. It omits Fusion, transforms and overlays. `mode="composite"` fails explicitly if a composited still is unavailable. Without a resize utility, actual dimensions are reported rather than invented.
 - **Audio:** Analysis reads source PCM, not the Fairlight mix. It excludes timeline gain, fades, mute, effects and retiming. Known source retiming is rejected. Silence uses 50 ms windows, not speech transcription. Results include the source offset, absolute timeline origin, exclusive ends and a truncation flag; default analysis limit is 300 seconds.
 - **Splits:** Fusion clips, locked tracks, mixed rates and known retiming are rejected before deletion. A checkpoint is retained. Rebuilt clips restore static transforms, enabled state, clip color and the current color-grade layer. Audio links, fades, keyframes, other grade layers and all metadata are not guaranteed. On failure, the tool opens the checkpoint and reports any partial attempted timeline honestly.
 - **Dialogue cuts:** Automatic application is restricted to one isolated clip or one aligned video/audio pair. It rejects stale review markers and complex multi-clip timelines. The original is kept intact. Review audio gain, fades and non-review markers on the result.
-- **Fusion effects:** Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain before MediaOut. The Python Console worker uses native input/modifier APIs and reads values back. These effects, speed changes and resets were live-checked on macOS Free 21.0.3.7. Tests also cover preserving user nodes. Other builds, Studio and large comps need verification; inspect results with `inspect_fusion` or the Fusion page.
+- **Fusion effects:** Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain before MediaOut. Effects, speed and resets passed live checks through the Lua connector on macOS Free 21.1.2.10 and through Python on Free 21.0.3.7. Tests also cover preserving user nodes. Other builds, Studio and large comps need verification; inspect results with `inspect_fusion` or the Fusion page.
 - **Speed:** Fusion mode changes video timing inside the clip, not timeline duration or linked audio. Resetting to 1× neutralizes only the updated bridge's own node; user-created and older untagged TimeSpeed nodes are left alone. Reverse mapping is not verified and is rejected. Clip-attributes mode changes **all uses of that media**, multiplying its current source FPS; it is not a per-clip reset or speed ramp.
 - **Validation:** Automated tests cover mocked Resolve operations, source decoding and MCP responses. They do not certify every operation on every Free-version build or platform. See [testing guidance](docs/TESTING.md) for the manual integration checklist.
 
@@ -292,6 +297,8 @@ Before an update, stop the worker and your MCP clients. The installer validates 
 <summary>Request safety, timeouts, and update recovery</summary>
 
 Console requests carry a unique ID, deadline, worker session and the project/timeline IDs last observed by that MCP client. Inspect `resolve_status` or `timeline_overview` in each client before its first queued edit. Mutations validate that context immediately before execution; stale or unavailable IDs are rejected. Restart the Console worker after updating: older workers are refused by the new client. Only one Console worker should use a runtime directory.
+
+The Lua route signs local request/reply/heartbeat bytes with HMAC-SHA256. Complete operations hold a cross-process lock and native lease; object handles and Stop requests belong to one session. Partial file reads are retried without resending edits. An uncertain response halts further native calls, records an unknown outcome and requires fresh inspection. Lua's heartbeat runs between native calls and can pause during a long native call; it is not a progress guarantee.
 
 The heartbeat reports `busy`, `state` (`running`, `completed`, `failed`, or initial `idle`) and `request_id`. Its reporting thread makes no Resolve API calls; project/timeline details are cached during jobs. A fresh heartbeat proves the Python reporter is alive, not that a native operation is making progress. A native call holding Python's GIL may still prevent heartbeat updates.
 

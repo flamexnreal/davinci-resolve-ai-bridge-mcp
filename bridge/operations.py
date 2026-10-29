@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.13.1"
+AGENT_VERSION = "1.14.0"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -3108,7 +3108,7 @@ class ResolveOperations:
                 "api_present": {method: callable(getattr(timeline, method, None)) if timeline is not None else None for method in ("DuplicateTimeline", "GetMarkers", "AddMarker", "DeleteClips", "GetUniqueId")},
                 "source_frame_decoder": self._ffmpeg_path() is not None,
                 "source_audio_decoder": bool(self._ffmpeg_path() or shutil.which("afconvert")),
-                "free_workflow": "Python startup is verified on macOS Free 21.0.3.7. This release does not support Free 21.1.2: Python scripting was removed and the investigated Lua connector cannot start. Review tools use ordinary APIs and source decoding.",
+                "free_workflow": "On Free 21.1+, use Start AI Bridge (Lua): authenticated native file APIs carry the shared operations without Python inside Resolve. The older Python worker remains available on Python-enabled builds. Review tools use ordinary APIs and source decoding.",
                 "limitations": ["API presence is not proof a call will succeed on this build; each operation checks its result.",
                                 "Composite frame export is attempted at capture time; source fallback needs ffmpeg and excludes timeline effects.",
                                 "Audio analysis reads source PCM, not the processed timeline mix.",

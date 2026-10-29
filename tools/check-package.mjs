@@ -12,6 +12,9 @@ const directory = mkdtempSync(join(tmpdir(), 'resolve-package-'));
 try {
   const [packed] = JSON.parse(execFileSync(npm, ['pack', '--json', '--ignore-scripts', '--pack-destination', directory], { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' }));
   const files = new Set(packed.files.map(file => file.path));
+  for (const required of ['agent/ResolveLua.lua', 'agent/lua/rpc.lua', 'agent/lua/json_raw.lua', 'agent/lua/sha256.lua', 'agent/lua/LICENSE', 'bridge/lua_transport.py', 'agent/menu/Start AI Bridge (Lua).lua', 'agent/menu/Stop AI Bridge (Lua).lua', 'agent/menu/Bridge Status (Lua).lua']) {
+    if (!files.has(required)) throw new Error(`Missing Lua runtime file: ${required}`);
+  }
   for (const required of ['requirements.txt', 'install.py', 'bridge/operations.py', 'bridge/server.py', 'bin/cli.js', 'agent/ResolveConsole.py', 'bridge/lifecycle.py', 'agent/menu/Start AI Bridge.py', 'agent/menu/Stop AI Bridge.py', 'agent/menu/Bridge Status.py']) {
     if (!files.has(required)) throw new Error(`Missing required npm file: ${required}`);
   }

@@ -19,7 +19,7 @@ Before analyzing audio, generating subtitles/captions, rendering motion graphics
 
 ## Required Workflow
 
-1. Call `resolve_status` before every editing session. This release does not support Free 21.1.2. Python startup is verified on macOS Free 21.0.3.7; Free 21.1+ removed Python scripting. On Python-enabled builds, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. Use the portable Py3 Console line only if automatic startup fails and Py3 exists.
+1. Call `resolve_status` before every editing session. On Free 21.1+, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (Lua) once per session. The native-file Lua connector is verified on macOS Free 21.1.2.10; Python runs in the external MCP process. On Python-enabled builds use Start AI Bridge or the portable Py3 fallback. Use Stop AI Bridge (Lua) for the Lua worker. Refresh the MCP server after updating.
 2. Call `timeline_overview` before proposing an edit.
 3. Summarize what is open and identify ambiguities.
 4. State a short plan before changing the timeline.
@@ -107,4 +107,4 @@ The public Resolve scripting API does not expose every action from the Edit page
 - Stale markers are refused after timeline edits. Reanalyze rather than bypassing the check.
 - project_health reports active-timeline source/gap/disabled-track issues; gaps can be intentional. On Resolve Free it also flags timelines above UHD or 60 fps, which Free cannot render. It does not inspect the full Fairlight mix or queued render settings.
 - After an approved render starts, follow it with render_status and report the final status and any error.
-- Run bridge_capabilities for API/decoder availability. Free uses the Console worker; no Studio AI feature should be substituted.
+- Run bridge_capabilities for API/decoder availability. Free uses the Lua or Python worker appropriate to its version; no Studio AI feature should be substituted.

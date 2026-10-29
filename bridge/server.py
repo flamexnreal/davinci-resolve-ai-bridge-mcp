@@ -223,7 +223,7 @@ def bridge_capabilities() -> str:
 
     API presence does not guarantee operation success. New review workflows use
     ordinary timeline APIs. Python startup is verified on macOS Free 21.0.3.7.
-    Resolve Free 21.1.2 is unsupported by this release.
+    Free 21.1+ uses the Lua native-file worker; Python runs outside Resolve.
     """
     return _result("bridge_capabilities")
 
