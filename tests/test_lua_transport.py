@@ -201,8 +201,12 @@ class FileTransportTests(unittest.TestCase):
         with patch.object(installer, "HOME", stage):
             installer.copy_runtime(runtime_home=destination)
         start = (stage / "ResolveLua.lua").read_text()
-        self.assertIn(str(destination), start)
-        self.assertNotIn(str(stage), start)
+        literal = start.splitlines()[0].split(" = ", 1)[1]
+        installed_home = json.loads(literal)
+        self.assertEqual(installed_home, str(destination))
+        self.assertNotIn(str(stage), installed_home)
+        if LuaRuntime is not None:
+            self.assertEqual(LuaRuntime().execute("return " + literal), str(destination))
         for name in ("lua-inbox.json", "lua-outbox.json", "lua-agent.json", "lua-stop.json"):
             if os.name != "nt":
                 self.assertEqual((stage / name).stat().st_mode & 0o777, 0o600)
