@@ -77,7 +77,7 @@ class Pool:
     def AppendToTimeline(self,requests):
         result=[]
         for r in requests[:self.append_limit]:
-            c=Clip(r['recordFrame'],r['recordFrame']+r['endFrame']-r['startFrame']+1,r['mediaPoolItem'],r['startFrame'],kind='video' if r['mediaType']==1 else 'audio',track=r['trackIndex'])
+            c=Clip(r['recordFrame'],r['recordFrame']+r['endFrame']-r['startFrame'],r['mediaPoolItem'],r['startFrame'],kind='video' if r['mediaType']==1 else 'audio',track=r['trackIndex'])
             self.project.current.clips.append(c);result.append(c)
         return result
 

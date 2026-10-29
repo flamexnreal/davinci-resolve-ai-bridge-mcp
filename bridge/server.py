@@ -222,7 +222,8 @@ def bridge_capabilities() -> str:
     """Report Resolve version, transport, API presence and source decoder availability.
 
     API presence does not guarantee operation success. New review workflows use
-    ordinary timeline APIs and work through the Console worker in Resolve Free.
+    ordinary timeline APIs. Python startup is verified on macOS Free 21.0.3.7.
+    Resolve Free 21.1.2 is unsupported by this release.
     """
     return _result("bridge_capabilities")
 
@@ -296,11 +297,14 @@ def append_media(
     track_index: Optional[int] = None,
     record_frame: Optional[int] = None,
     create_track: bool = True,
+    media_type: Optional[int] = None,
 ) -> str:
     """Append video or audio to the timeline from media pool ids or absolute file paths.
 
     Omit track_index and record_frame to append at the end of the timeline. For still
     images use add_image instead, which controls how long the still lasts.
+    Audio and video are retained by default. Use media_type=1 for video only
+    or media_type=2 for audio only; track_index then selects that track type.
     """
     return _result(
         "append_media",
@@ -310,6 +314,7 @@ def append_media(
             "track_index": track_index,
             "record_frame": record_frame,
             "create_track": create_track,
+            "media_type": media_type,
         },
         timeout=90.0,
     )

@@ -1,5 +1,12 @@
 # Testing
 
+## v1.13.1 compatibility checks
+
+See [COMPATIBILITY.md](COMPATIBILITY.md) for the live macOS Free 21.1.2.10
+startup failure and the Free 21.0.3.7 editing investigation. The Lua prototype
+is excluded from the stable release. Do not infer current Free support from
+automated tests or from older build results.
+
 ## Automated checks
 
 Use Python 3.10+ with `requirements.txt` installed:

@@ -11,9 +11,17 @@ Let your AI assistant help with the edit. Resolve AI Bridge connects Claude, Cod
 
 Inspect a timeline, place media, animate a zoom, adjust color, or try an edit on a duplicate timeline before touching the original.
 
+**Check your Resolve version before installing.** Python startup is verified on
+**macOS Resolve Free 21.0.3.7**. Blackmagic
+[moved Python scripting to Studio in 21.1](https://www.blackmagicdesign.com/support/readme/59dd4eef1f4941c29fb8dc48b33f5c87).
+**This release does not support Free 21.1.2.** Live testing on macOS Free
+21.1.2.10 also found that the investigated Lua connector could not start: the
+Console and Lua menu lack its required file-loading/FFI facilities. Reinstalling
+Python does not restore the missing Py3 tab. See [compatibility evidence](docs/COMPATIBILITY.md).
+
 ### Built to stay light
 
-- **Works with Resolve Free.** No Studio license needed for the bridge. Individual tools still depend on your Resolve build; Studio-only effects stay Studio-only.
+- **Works with Python-enabled Resolve Free builds.** Startup is verified on macOS Free 21.0.3.7; Free 21.1.2 is unsupported. Studio-only effects stay Studio-only.
 - **One click to start.** Choose **Start AI Bridge** in Resolve. Your AI gets the same tools and access as the old Console-paste workflow.
 - **A small, local runtime.** No remote bridge server or manually entered token. Website dependencies stay out of the CLI package; FFmpeg and Remotion are optional.
 - **Keep your tokens for the edit.** The launcher starts locally, without an AI request or extra startup tools.
@@ -81,7 +89,7 @@ This optional download stays in the bridge's private Python environment. It is n
 
 If the menu is missing after installation, quit and reopen Resolve once. Refresh/restart your AI client's MCP server after setup or a tool-schema update.
 
-Menu startup is live-tested on **macOS / Resolve Free 21.0.3.7 / Python 3.14.6**. Windows, Linux, and other builds still need live verification; the Console fallback stays available.
+Menu startup is live-tested on **macOS / Resolve Free 21.0.3.7 / Python 3.14.6**. The Py3 fallback requires a Python-enabled build. Free 21.1.2 is unsupported; Windows, Linux and other builds still need live verification.
 
 <br>
 
@@ -94,7 +102,7 @@ If automatic startup reports an error on your build, open **Workspace → Consol
 import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
 ```
 
-**Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. Windows/Linux and other Resolve builds still require live verification; the portable fallback remains available.
+**Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. This does not establish Free 21.1+ support. Windows/Linux and other builds still need live verification.
 
 Resolve may keep the menu script marked busy while its separate `fuscript` process serves requests. Resolve's editing UI remains usable. Closing Resolve ends that process. The Console fallback uses a daemon worker with a startup handshake capped at one second. No new dependency, listening port, public MCP tool, or AI call is added.
 
@@ -188,12 +196,12 @@ Fusion effects (`animate_zoom`, blur, spotlight, saturation, color fx) are the e
 <details>
 <summary>Tool compatibility and limitations</summary>
 
-- **Free edition:** New review workflows use ordinary timeline, marker and clip APIs through the Console worker. No Studio AI transcription, Magic Mask, Smart Reframe, or neural feature was added. Calls check their results and report unsupported behavior.
+- **Free edition:** The Console worker needs a Python-enabled Resolve build; this release does not support Free 21.1.2. Review workflows use ordinary timeline, marker and clip APIs. No Studio AI transcription, Magic Mask, Smart Reframe, or neural feature was added.
 - **Frame images:** Source fallback shows decoded source media, **not** the graded/composited viewer. It omits Fusion, transforms and overlays. `mode="composite"` fails explicitly if a composited still is unavailable. Without a resize utility, actual dimensions are reported rather than invented.
 - **Audio:** Analysis reads source PCM, not the Fairlight mix. It excludes timeline gain, fades, mute, effects and retiming. Known source retiming is rejected. Silence uses 50 ms windows, not speech transcription. Results include the source offset, absolute timeline origin, exclusive ends and a truncation flag; default analysis limit is 300 seconds.
 - **Splits:** Fusion clips, locked tracks, mixed rates and known retiming are rejected before deletion. A checkpoint is retained. Rebuilt clips restore static transforms, enabled state, clip color and the current color-grade layer. Audio links, fades, keyframes, other grade layers and all metadata are not guaranteed. On failure, the tool opens the checkpoint and reports any partial attempted timeline honestly.
 - **Dialogue cuts:** Automatic application is restricted to one isolated clip or one aligned video/audio pair. It rejects stale review markers and complex multi-clip timelines. The original is kept intact. Review audio gain, fades and non-review markers on the result.
-- **Fusion effects:** Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain in front of MediaOut, so they stack and your own Fusion nodes stay connected. Resets remove only bridge-owned nodes. Every result reports the chain and whether values read back. These effects are tested against a simulated Fusion comp that runs the generated Lua in LuaJIT, **not yet against a live Resolve**. Check them with `inspect_fusion` or the Fusion page.
+- **Fusion effects:** Zoom, blur, spotlight, saturation and color fx share one bridge-owned chain before MediaOut. The Python Console worker uses native input/modifier APIs and reads values back. These effects, speed changes and resets were live-checked on macOS Free 21.0.3.7. Tests also cover preserving user nodes. Other builds, Studio and large comps need verification; inspect results with `inspect_fusion` or the Fusion page.
 - **Speed:** Fusion mode changes video timing inside the clip, not timeline duration or linked audio. Resetting to 1× neutralizes only the updated bridge's own node; user-created and older untagged TimeSpeed nodes are left alone. Reverse mapping is not verified and is rejected. Clip-attributes mode changes **all uses of that media**, multiplying its current source FPS; it is not a per-clip reset or speed ramp.
 - **Validation:** Automated tests cover mocked Resolve operations, source decoding and MCP responses. They do not certify every operation on every Free-version build or platform. See [testing guidance](docs/TESTING.md) for the manual integration checklist.
 
@@ -314,7 +322,7 @@ npm ci
 npm run build
 ```
 
-The package check creates and inspects a temporary npm tarball; it does not publish. There is no hosted CI yet, so run these checks locally before a release. Install the optional `lupa` package (`python3 -m pip install lupa`) to run the Fusion Lua tests too; without it they are skipped. Maintainers: see [release instructions](docs/RELEASING.md).
+The package check creates and inspects a temporary npm tarball; it does not publish. GitHub Actions runs the suite, package check, website build and dependency audit on Linux, macOS and Windows. Install optional `lupa` (`python3 -m pip install lupa`) to run the Fusion Lua tests too. Maintainers: see [release instructions](docs/RELEASING.md).
 
 </details>
 

@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.13.0"
+AGENT_VERSION = "1.13.1"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -196,7 +196,7 @@ FUSION_OWNER_KEY = "ResolveAIBridgeOwner"
 FUSION_STAGE_KEY = "ResolveAIBridgeStage"
 FUSION_ROLE_KEY = "ResolveAIBridgeRole"
 FUSION_LUA_KEY = "ResolveAIBridgeLua"
-FUSION_STAGE_ORDER = ("blur", "spotlight", "zoom", "saturation", "color_fx")
+FUSION_STAGE_ORDER = ("blur", "spotlight", "zoom", "saturation", "color_fx", "speed")
 # Names created before stages were tagged: prefix -> (stage kind, role).
 LEGACY_FUSION_PREFIXES = (
     ("AIBridgeBlur_", "blur", "main"),
@@ -233,6 +233,9 @@ def _fusion_tools(comp):
 
 def _fusion_role(tool):
     """Return (stage key, role) for a bridge-owned node, otherwise None."""
+    if (call(tool, "GetData", None, FUSION_OWNER_KEY) == "resolve-ai-bridge.change_clip_speed.v1"
+            and call(tool, "GetAttrs", None, "TOOLS_RegID") == "TimeSpeed"):
+        return "speed", "main"
     if call(tool, "GetData", None, FUSION_OWNER_KEY) == FUSION_OWNER:
         stage = call(tool, "GetData", None, FUSION_STAGE_KEY)
         role = call(tool, "GetData", None, FUSION_ROLE_KEY)
@@ -429,6 +432,8 @@ class FusionEdit:
         self.nodes = _fusion_stages(comp).get(stage, {})
         self.created = []
         self.retired = []
+        self.bindings = {}
+        self.actions = []
         value = call(comp, "GetAttrs", None, "COMPN_RenderStart")
         try:
             value = float(value)
@@ -488,18 +493,23 @@ class FusionEdit:
         return call(node, "GetInput", None, input_name) is not None
 
     def bind(self, var, node):
+        self.bindings[var] = node
         name = json.dumps(_fusion_name(node))
         return "local %s = comp:FindTool(%s)\nassert(%s, %s)" % (
             var, name, var, json.dumps("Fusion lost " + _fusion_name(node)))
 
-    @staticmethod
-    def static(var, input_name, value):
+    def static(self, var, input_name, value):
+        self.actions.append(("static", var, input_name, value))
         return ['%s:ConnectInput("%s", nil)' % (var, input_name), "%s.%s = %s" % (var, input_name, _lua_num(value))]
 
-    @staticmethod
-    def static_point(var, input_name, x, y):
+    def static_point(self, var, input_name, x, y):
+        self.actions.append(("static", var, input_name, (x, y)))
         return ['%s:ConnectInput("%s", nil)' % (var, input_name),
                 "%s.%s = {%s, %s}" % (var, input_name, _lua_num(x), _lua_num(y))]
+
+    def connect(self, var, input_name, target=None):
+        self.actions.append(("connect", var, input_name, target))
+        return '%s:ConnectInput("%s", %s)' % (var, input_name, target or "nil")
 
     def _keys(self, target, pairs):
         """Key ``target`` once per listed clip frame, in compact Lua chunks."""
@@ -517,23 +527,97 @@ class FusionEdit:
         return lines
 
     def animate(self, var, input_name, pairs):
+        self.actions.append(("animate", var, input_name, pairs))
         return ["%s.%s = BezierSpline()" % (var, input_name)] + self._keys("%s.%s" % (var, input_name), pairs)
 
     def animate_point(self, var, input_name, xs, ys):
+        self.actions.append(("point", var, input_name, (xs, ys)))
         path = "%s_%s" % (var, input_name.lower())
         lines = ["%s.%s = XYPath()" % (var, input_name),
                  "local %s = %s.%s:GetConnectedOutput():GetTool()" % (path, var, input_name),
                  "%s.X = BezierSpline()" % path, "%s.Y = BezierSpline()" % path]
         return lines + self._keys(path + ".X", xs) + self._keys(path + ".Y", ys)
 
+    @staticmethod
+    def _input(node, name):
+        inputs = call(node, "GetInputList", {}) or {}
+        return next((inp for inp in (inputs.values() if isinstance(inputs, dict) else inputs)
+                     if call(inp, "GetAttrs", None, "INPS_ID") == name), None)
+
+    @staticmethod
+    def _verify_value(node, name, value, time=None):
+        actual = call(node, "GetInput", None, name, time) if time is not None else call(node, "GetInput", None, name)
+        try:
+            if isinstance(value, tuple):
+                actual = [actual.get(i, actual.get(str(i))) for i in (1, 2)] if isinstance(actual, dict) else actual
+                valid = all(math.isclose(float(a), b, rel_tol=1e-7, abs_tol=1e-7) for a, b in zip(actual, value)) and len(actual) >= 2
+            else:
+                valid = math.isclose(float(actual), float(value), rel_tol=1e-7, abs_tol=1e-7)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
+            raise OperationError("Fusion did not preserve %s.%s at %s; inspect the clip." % (_fusion_name(node), name, time))
+
+    def _native_curve(self, node, name, pairs):
+        call(node, "ConnectInput", None, name, None)
+        if not call(node, "AddModifier", False, name, "BezierSpline"):
+            raise OperationError("Fusion could not animate %s.%s on this build." % (_fusion_name(node), name))
+        for frame, value in pairs:
+            node.SetInput(name, value, self.t0 + frame)
+        for frame, value in (pairs[0], pairs[-1]):
+            self._verify_value(node, name, value, self.t0 + frame)
+
+    def _native(self):
+        # A resident Python menu worker can hold Fusion's shared script executor.
+        # Use ordinary native input/modifier APIs instead of queuing another script.
+        for kind, var, name, value in self.actions:
+            node = self.bindings[var]
+            if kind == "static":
+                call(node, "ConnectInput", None, name, None)
+                node.SetInput(name, {1: value[0], 2: value[1]} if isinstance(value, tuple) else value)
+                self._verify_value(node, name, value)
+            elif kind == "animate":
+                self._native_curve(node, name, value)
+            elif kind == "point":
+                call(node, "ConnectInput", None, name, None)
+                if not call(node, "AddModifier", False, name, "XYPath"):
+                    raise OperationError("Fusion could not add the animated point path.")
+                port = self._input(node, name)
+                output = call(port, "GetConnectedOutput", None)
+                path = call(output, "GetTool", None)
+                if path is None:
+                    raise OperationError("Fusion did not expose the animated point path.")
+                xs, ys = value
+                self._native_curve(path, "X", xs)
+                self._native_curve(path, "Y", ys)
+                for index in (0, -1):
+                    self._verify_value(node, name, (xs[index][1], ys[index][1]), self.t0 + xs[index][0])
+            elif kind == "connect":
+                target = self.bindings[value] if value is not None else None
+                node.ConnectInput(name, target)
+                output = call(self._input(node, name), "GetConnectedOutput", None)
+                if _output_name(output) != (_fusion_name(target) if target is not None else None):
+                    raise OperationError("Fusion did not connect %s.%s." % (_fusion_name(node), name))
+        return True
+
     def lua(self, lines):
         """Run Lua in the comp: True if it finished, False if it stopped, None if unknowable."""
+        if self.ops.transport == "console":
+            return self._native()
         nonce = uuid.uuid4().hex
         call(self.comp, "SetData", None, FUSION_LUA_KEY, "pending")
+        error_key = FUSION_LUA_KEY + "Error"
+        call(self.comp, "SetData", None, error_key, None)
         before = call(self.comp, "GetData", None, FUSION_LUA_KEY)
-        script = "\n".join([LUA_KEYS_HELPER] + list(lines) + ['comp:SetData("%s", "%s")' % (FUSION_LUA_KEY, nonce)])
+        script = "\n".join(["local aib_ok, aib_error = pcall(function()", LUA_KEYS_HELPER] + list(lines) + [
+            "end)",
+            'if not aib_ok then comp:SetData("%s", tostring(aib_error)); return end' % error_key,
+            'comp:SetData("%s", "%s")' % (FUSION_LUA_KEY, nonce)])
         call(self.comp, "Execute", None, script)
         after = call(self.comp, "GetData", None, FUSION_LUA_KEY)
+        error = call(self.comp, "GetData", None, error_key)
+        if error:
+            raise OperationError("Fusion Lua failed: %s. The bridge effect was not connected." % error)
         if after == nonce:
             return True
         return False if before == "pending" else None
@@ -888,8 +972,8 @@ class ResolveOperations:
                 )
         return wanted
 
-    def _apply_transform(self, item, params):
-        """Apply the transform subset of ``params`` to one timeline item."""
+    def _apply_transform(self, item, params, verify=False):
+        """Apply transforms; reconstruction also verifies the resulting values."""
         applied = {}
         rejected = {}
         width, height = self._project_resolution()
@@ -938,7 +1022,16 @@ class ResolveOperations:
                 requests.append((key, int(value)))
 
         for key, value in requests:
-            if call(item, "SetProperty", False, key, value):
+            accepted = call(item, "SetProperty", False, key, value)
+            if verify:
+                # Some builds expose read-only defaults such as AnchorPointX/Y.
+                # An already matching value is preserved even if its setter is
+                # rejected; a reported success with a different value is not.
+                current = call(item, "GetProperty", None, key)
+                accepted = current == value
+                if isinstance(current, (int, float)) and isinstance(value, float):
+                    accepted = math.isclose(current, value, rel_tol=1e-7, abs_tol=1e-7)
+            if accepted:
                 applied[key] = value
             else:
                 rejected[key] = value
@@ -1118,15 +1211,32 @@ class ResolveOperations:
             items = self._find_media_items(media_ids)
 
         timeline = self._timeline()
-        track_type = str(params.get("track_type", "audio" if int(params.get("media_type", 1)) == 2 else "video")).lower()
-        media_type = int(params.get("media_type", 2 if track_type == "audio" else 1))
+        # Resolve interprets mediaType=1 as VIDEO ONLY. Leave it out by default
+        # so positioning an AV clip does not silently discard its audio.
+        media_type = params.get("media_type")
+        requested_type = params.get("track_type")
+        if media_type is None and requested_type is not None:
+            if str(requested_type).lower() not in ("audio", "video"):
+                raise OperationError("track_type must be audio or video.")
+            media_type = 2 if str(requested_type).lower() == "audio" else 1
+        if media_type is not None:
+            if media_type not in (1, 2):
+                raise OperationError("media_type must be 1 (video only), 2 (audio only), or omitted for both.")
+            media_type = int(media_type)
+        track_type = "audio" if media_type == 2 else "video"
         track_index = params.get("track_index")
         if track_index is not None:
-            if track_type == "audio" or media_type == 2:
+            track_index = int(track_index)
+            if track_index < 1:
+                raise OperationError("track_index must be at least 1.")
+            if track_type == "audio":
                 count = int(call(timeline, "GetTrackCount", 0, "audio") or 0)
-                if int(track_index) > count:
-                    for _ in range(int(track_index) - count):
-                        call(timeline, "AddTrack", False, "audio")
+                if track_index > count:
+                    if not params.get("create_track", True):
+                        raise OperationError("Audio track A%d does not exist and create_track is false." % track_index)
+                    for _ in range(track_index - count):
+                        if not call(timeline, "AddTrack", False, "audio"):
+                            raise OperationError("Resolve refused to create the requested audio track.")
             else:
                 track_index = self._ensure_video_track(
                     timeline, track_index, bool(params.get("create_track", True))
@@ -1134,7 +1244,8 @@ class ResolveOperations:
         record_frame = params.get("record_frame")
 
         payload = items
-        if track_index is not None or record_frame is not None or params.get("start_frame") is not None:
+        if (track_index is not None or record_frame is not None or media_type is not None
+                or params.get("start_frame") is not None or params.get("end_frame") is not None):
             payload = []
             for item in items:
                 clip_info = {"mediaPoolItem": item}
@@ -1142,7 +1253,8 @@ class ResolveOperations:
                     clip_info["trackIndex"] = int(track_index)
                 if record_frame is not None:
                     clip_info["recordFrame"] = int(record_frame)
-                clip_info["mediaType"] = media_type
+                if media_type is not None:
+                    clip_info["mediaType"] = media_type
                 frames = (call(item, "GetClipProperty", {}) or {}).get("Frames")
                 try:
                     total = int(frames)
@@ -1156,9 +1268,11 @@ class ResolveOperations:
                     if sub is not None:
                         clip_info["mediaPoolItem"] = sub
                     else:
-                        clip_info.update({"startFrame": sf, "endFrame": ef})
+                        clip_info.update({"startFrame": sf, "endFrame": ef + 1})
                 elif total > 1:
-                    ef = total - 1
+                    # AppendToTimeline's source end is exclusive (live checked
+                    # in both Python and Lua on macOS Free 21.0.3.7).
+                    ef = total
                     clip_info.update({"startFrame": sf, "endFrame": ef})
                 payload.append(clip_info)
 
@@ -1232,7 +1346,7 @@ class ResolveOperations:
         clip_info = {
             "mediaPoolItem": media_item,
             "startFrame": 0,
-            "endFrame": duration_frames - 1,
+            "endFrame": duration_frames,
             "trackIndex": int(track_index),
         }
         if record_frame is not None:
@@ -1242,7 +1356,7 @@ class ResolveOperations:
         fallback_used = False
         if not created and available_frames > 1:
             # Some builds refuse an endFrame beyond the still's reported length.
-            clip_info["endFrame"] = min(duration_frames, available_frames) - 1
+            clip_info["endFrame"] = min(duration_frames, available_frames)
             created = pool.AppendToTimeline([clip_info]) or []
             fallback_used = bool(created)
         if not created:
@@ -1260,10 +1374,8 @@ class ResolveOperations:
         item = created[0]
         actual = call(item, "GetDuration", None)
         applied, rejected = self._apply_transform(item, params)
-        _, info = self._newest_item_on_track(timeline, track_index)
-
         result = {
-            "item": (info or {}).get("id"),
+            "item": self._item_id_after_rebuild(timeline, item),
             "name": call(item, "GetName", ""),
             "media_pool_id": call(media_item, "GetUniqueId", None),
             "reused_existing_media": reused,
@@ -1287,8 +1399,8 @@ class ResolveOperations:
         try:
             if actual is not None and int(actual) != duration_frames:
                 notes.append(
-                    "Requested %d frames, Resolve created %d. Raise Preferences > Editing > "
-                    "Standard still duration if longer stills are needed."
+                    "Requested %d frames, Resolve created %d. Check Preferences > Editing > "
+                    "Standard still duration or adjust the still manually in Resolve."
                     % (duration_frames, int(actual))
                 )
         except (TypeError, ValueError):
@@ -1376,7 +1488,7 @@ class ResolveOperations:
         segments = []
         for begin, finish in ((start, frame), (frame, end)):
             segments.append({"mediaPoolItem": media, "startFrame": source_start + begin - start,
-                             "endFrame": source_start + finish - start - 1, "recordFrame": begin,
+                             "endFrame": source_start + finish - start, "recordFrame": begin,
                              "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2})
         if not timeline.DeleteClips([item], False):
             raise OperationError("Resolve refused to remove the original clip. Checkpoint: %s." % checkpoint_info["name"])
@@ -1385,10 +1497,10 @@ class ResolveOperations:
             if len(created) != 2:
                 raise OperationError("Resolve created %d of 2 halves." % len(created))
             for piece, segment in zip(created, segments):
-                expected_end = segment["recordFrame"] + segment["endFrame"] - segment["startFrame"] + 1
+                expected_end = segment["recordFrame"] + segment["endFrame"] - segment["startFrame"]
                 if call(piece, "GetStart", None) != segment["recordFrame"] or call(piece, "GetEnd", None) != expected_end:
                     raise OperationError("Resolve rebuilt a half at an unexpected position or duration.")
-                _, rejected = self._apply_transform(piece, transform_params_from_props(transform))
+                _, rejected = self._apply_transform(piece, transform_params_from_props(transform), verify=True)
                 if rejected:
                     raise OperationError("Resolve rejected restored transforms: %s." % sorted(rejected))
                 if enabled is not None and not call(piece, "SetClipEnabled", False, enabled):
@@ -1533,7 +1645,9 @@ class ResolveOperations:
             fallback = False
             if lua_ok is False:
                 # Keep the honest static fallback: a scale that holds, not a claimed animation.
-                fallback = bool(call(node, "SetInput", False, "Size", end_zoom))
+                call(node, "ConnectInput", None, "Size", None)
+                call(node, "SetInput", None, "Size", end_zoom)
+                fallback = edit.check(node, "Size", end_frame, end_zoom) is True
             chain = edit.finish()
         except Exception:
             edit.rollback()
@@ -2110,9 +2224,9 @@ class ResolveOperations:
                 if shape == "RectangleMask":
                     lines += edit.static("mask", "CornerRadius", corner_radius)
                 lines += edit.static("mask", "SoftEdge", soft_edge)
-                lines.append('blur:ConnectInput("EffectMask", mask)')
+                lines.append(edit.connect("blur", "EffectMask", "mask"))
             else:
-                lines.append('blur:ConnectInput("EffectMask", nil)')
+                lines.append(edit.connect("blur", "EffectMask"))
                 edit.drop("mask")
             lua_ok = edit.lua(lines)
             if lua_ok is False:
@@ -2207,8 +2321,8 @@ class ResolveOperations:
             else:
                 lines += edit.static_point("mask", "Center", cx, cy)
             lines += edit.static("mask", "SoftEdge", soft_edge)
-            lines += ['merge:ConnectInput("Background", base)', 'merge:ConnectInput("Foreground", gain)',
-                      'merge:ConnectInput("EffectMask", mask)']
+            lines += [edit.connect("merge", "Background", "base"), edit.connect("merge", "Foreground", "gain"),
+                      edit.connect("merge", "EffectMask", "mask")]
             lua_ok = edit.lua(lines)
             if lua_ok is False:
                 raise OperationError(self._fusion_summary(None, False))
@@ -2390,6 +2504,8 @@ class ResolveOperations:
         home = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
         try:
             path = Path((home / "ffmpeg-path.txt").read_text(encoding="utf-8").strip())
+            if not path.is_absolute():
+                path = home / path
             return str(path) if path.is_file() and os.access(path, os.X_OK) else None
         except OSError:
             return None
@@ -2823,7 +2939,7 @@ class ResolveOperations:
             "source_items": [info["id"] for _, info in targets],
         }
 
-    def _timeline_snapshot(self, timeline):
+    def _timeline_snapshot(self, timeline, include_track_state=True):
         """Read comparable structure without changing the active timeline."""
         tracks = []
         for kind in ("video", "audio", "subtitle"):
@@ -2840,8 +2956,8 @@ class ResolveOperations:
                     info["fusion_count"] = call(item, "GetFusionCompCount", 0)
                     clips.append(info)
                 tracks.append({"type": kind, "index": index, "name": call(timeline, "GetTrackName", "", kind, index),
-                               "enabled": call(timeline, "GetIsTrackEnabled", None, kind, index),
-                               "locked": call(timeline, "GetIsTrackLocked", None, kind, index), "clips": clips})
+                               "enabled": call(timeline, "GetIsTrackEnabled", None, kind, index) if include_track_state else None,
+                               "locked": call(timeline, "GetIsTrackLocked", None, kind, index) if include_track_state else None, "clips": clips})
         return {"start": call(timeline, "GetStartFrame", None), "end": call(timeline, "GetEndFrame", None),
                 "settings": {key: call(timeline, "GetSetting", None, key) for key in ("timelineFrameRate", "timelineResolutionWidth", "timelineResolutionHeight")},
                 "tracks": tracks}
@@ -2862,10 +2978,16 @@ class ResolveOperations:
         if duplicate is None or isinstance(duplicate, bool):
             raise OperationError("Timeline duplication is unavailable on this Resolve build; no edit was attempted.")
         try:
-            if self._timeline_snapshot(duplicate) != before:
-                raise OperationError("The duplicate did not match the original timeline structure; no edit was attempted.")
+            # DuplicateTimeline may activate its copy. Resolve can report false
+            # track-enabled flags on inactive timelines, so verify each while open.
+            if not project.SetCurrentTimeline(original):
+                raise OperationError("Could not reopen the original to verify its checkpoint.")
             if self._timeline_snapshot(original) != before:
                 raise OperationError("Timeline changed while it was being copied; inspect both timelines before editing.")
+            if not project.SetCurrentTimeline(duplicate):
+                raise OperationError("Could not open the duplicate to verify its structure.")
+            if self._timeline_snapshot(duplicate) != before:
+                raise OperationError("The duplicate did not match the original timeline structure; no edit was attempted.")
             target = duplicate if open_duplicate else original
             if not project.SetCurrentTimeline(target):
                 raise OperationError("Could not open the requested timeline after duplication.")
@@ -2894,7 +3016,10 @@ class ResolveOperations:
     def _op_compare_timelines(self, params):
         original = self._find_timeline(params.get("original"))
         preview = self._find_timeline(params.get("preview"))
-        before, after = self._timeline_snapshot(original), self._timeline_snapshot(preview)
+        # Comparing without opening either timeline cannot reliably compare track
+        # enabled/locked flags on all builds. Omit those flags from both snapshots.
+        before = self._timeline_snapshot(original, include_track_state=False)
+        after = self._timeline_snapshot(preview, include_track_state=False)
         changes = []
         for key in ("start", "end", "settings"):
             if before[key] != after[key]:
@@ -2910,7 +3035,7 @@ class ResolveOperations:
             changes.append({"field": "markers", "before": before_markers, "after": after_markers})
         return {"original": self._timeline_identity(original), "preview": self._timeline_identity(preview),
                 "structurally_equal": not changes, "changes": changes,
-                "limitations": "Compares tracks, ranges, source references, readable clip properties, Fusion counts and markers. Does not compare rendered pixels, internal Fusion graphs, full color grades or Fairlight processing."}
+                "limitations": "Compares track names/counts, ranges, source references, readable clip properties, Fusion counts and markers. Track enabled/locked flags are omitted because inactive timelines can report them incorrectly. Does not compare rendered pixels, internal Fusion graphs, full color grades or Fairlight processing."}
 
     def _op_project_health(self, params):
         timeline, project = self._timeline(), self._project()
@@ -2983,7 +3108,7 @@ class ResolveOperations:
                 "api_present": {method: callable(getattr(timeline, method, None)) if timeline is not None else None for method in ("DuplicateTimeline", "GetMarkers", "AddMarker", "DeleteClips", "GetUniqueId")},
                 "source_frame_decoder": self._ffmpeg_path() is not None,
                 "source_audio_decoder": bool(self._ffmpeg_path() or shutil.which("afconvert")),
-                "free_workflow": "Start the Console worker inside Resolve Free. These review tools use regular timeline/marker APIs and external source decoding; no Studio AI features are used.",
+                "free_workflow": "Python startup is verified on macOS Free 21.0.3.7. This release does not support Free 21.1.2: Python scripting was removed and the investigated Lua connector cannot start. Review tools use ordinary APIs and source decoding.",
                 "limitations": ["API presence is not proof a call will succeed on this build; each operation checks its result.",
                                 "Composite frame export is attempted at capture time; source fallback needs ffmpeg and excludes timeline effects.",
                                 "Audio analysis reads source PCM, not the processed timeline mix.",
@@ -3087,13 +3212,13 @@ class ResolveOperations:
                 segment_items = []
                 for original, info, media, source, transform in originals:
                     request = {"mediaPoolItem": media, "startFrame": source + begin - start,
-                               "endFrame": source + finish - start - 1, "recordFrame": record,
+                               "endFrame": source + finish - start, "recordFrame": record,
                                "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2}
                     created = self._media_pool().AppendToTimeline([request]) or []
                     if len(created) != 1 or call(created[0], "GetStart", None) != record or call(created[0], "GetEnd", None) != record + finish - begin:
                         raise OperationError("Resolve returned an incorrect rebuilt dialogue segment.")
                     piece = created[0]
-                    _, rejected = self._apply_transform(piece, transform_params_from_props(transform))
+                    _, rejected = self._apply_transform(piece, transform_params_from_props(transform), verify=True)
                     if rejected:
                         raise OperationError("Could not restore the dialogue transform.")
                     if info.get("enabled") is not None and not call(piece, "SetClipEnabled", False, info["enabled"]):
@@ -3113,7 +3238,8 @@ class ResolveOperations:
                 try:
                     data = json.loads(marker.get("customData", ""))
                     if isinstance(data, dict) and data.get("bridge") == "silence-review-v1":
-                        if not preview.DeleteMarkerAtFrame(offset):
+                        # JSON transports stringify numeric dictionary keys.
+                        if not preview.DeleteMarkerAtFrame(float(offset)):
                             raise OperationError("Could not remove stale review markers on the preview.")
                 except (ValueError, TypeError):
                     pass

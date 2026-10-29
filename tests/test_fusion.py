@@ -4,10 +4,11 @@ These run against tests/fusion_fakes.py, not a real Resolve.
 """
 
 import unittest
+from unittest.mock import patch
 
-from bridge.operations import FUSION_OWNER, OperationError, ResolveOperations
+from bridge.operations import FUSION_OWNER, FusionEdit, OperationError, ResolveOperations
 from fakes import Clip, Project, Resolve
-from fusion_fakes import Comp, lupa
+from fusion_fakes import Comp, Tool, lupa
 
 LUA = unittest.skipUnless(lupa, "install lupa to run generated Fusion Lua")
 
@@ -51,6 +52,16 @@ class FusionChainTests(unittest.TestCase):
         for _ in range(3):
             op._op_animate_zoom({"item_id": item})
         self.assertEqual(sum(t.reg_id == "Transform" for t in comp.tools), 1)
+
+    def test_effect_reset_preserves_owned_speed_and_user_chain(self):
+        op, comp, item = self.make(user_nodes=("Glow",))
+        op._op_apply_blur_effect({"item_id": item})
+        op._op_animate_zoom({"item_id": item})
+        op._op_change_clip_speed({"item_id": item, "speed": 0.75})
+        op._op_change_clip_speed({"item_id": item, "speed": 1})
+        op._op_apply_blur_effect({"item_id": item, "reset": True})
+        self.assertEqual(comp.chain(), ["ResolveAIBridgeTimeSpeed", "AIBridgeZoom", "Glow1", "MediaIn1"])
+        self.assertEqual(comp.FindTool("ResolveAIBridgeTimeSpeed").GetInput("Speed"), 1)
 
     def test_reset_removes_only_bridge_nodes(self):
         op, comp, item = self.make(user_nodes=("Glow",))
@@ -163,6 +174,11 @@ class FusionChainTests(unittest.TestCase):
 class FusionLuaTests(unittest.TestCase):
     make = FusionChainTests.make
 
+    def test_lua_error_is_returned_without_console_access(self):
+        op, comp, _ = self.make()
+        with self.assertRaisesRegex(OperationError, "fixture failure"):
+            FusionEdit(op, comp, "test").lua(["error('fixture failure')"])
+
     def test_zoom_keys_land_on_clip_frames(self):
         op, comp, item = self.make(render_start=1000, start=500, end=600)
         result = op._op_animate_zoom({"item_id": item, "start_zoom": 1, "end_zoom": 2, "easing": "linear",
@@ -216,8 +232,44 @@ class FusionLuaTests(unittest.TestCase):
         result = op._op_animate_zoom({"item_id": item})
         from bridge.operations import FusionEdit
         edit = FusionEdit(op, comp, "zoom")
-        self.assertFalse(edit.lua([edit.bind("z", comp.FindTool("AIBridgeZoom")), "z.Nope = 1"]))
+        with self.assertRaisesRegex(OperationError, "Nope"):
+            edit.lua([edit.bind("z", comp.FindTool("AIBridgeZoom")), "z.Nope = 1"])
         self.assertTrue(result["keyframes_created"])
+
+
+class FusionNativeTests(unittest.TestCase):
+    make = FusionChainTests.make
+
+    def test_console_animation_stacks_without_queuing_lua(self):
+        op, comp, item = self.make(user_nodes=("Glow",), render_start=1000)
+        op.transport = "console"
+        comp.fail_lua = True
+        zoom = op._op_animate_zoom({"item_id": item, "end_zoom": 1.3, "end_frame": 30, "target_center_x": 0.65})
+        self.assertTrue(zoom["keyframes_verified"])
+        self.assertAlmostEqual(comp.FindTool("AIBridgeZoom").GetInput("Size", 1030), 1.3)
+        self.assertTrue(op._op_apply_blur_effect({"item_id": item, "width": 0.3})["verified"])
+        op._op_apply_spotlight_mask({"item_id": item})
+        self.assertTrue(op._op_keyframe_clip_saturation({"item_id": item})["verified"])
+        op._op_animate_color_fx({"item_id": item})
+        self.assertEqual(comp.scripts, [])
+        self.assertEqual(op._op_inspect_fusion({"item_id": item})["bridge_chain"]["source"], "Glow1")
+
+    def test_console_animated_mask_uses_comp_time(self):
+        op, comp, item = self.make(render_start=100)
+        op.transport = "console"
+        result = op._op_apply_blur_effect({"item_id": item, "keyframes": [
+            {"frame": 10, "size": 1, "cx": 0.2}, {"frame": 20, "size": 5, "cx": 0.7}]})
+        self.assertTrue(result["verified"])
+        self.assertAlmostEqual(comp.FindTool("AIBridgeMask_1").GetInput("Center", 120)[0], 0.7)
+
+    def test_console_refuses_unapplied_keyframes_and_retains_user_graph(self):
+        op, comp, item = self.make(user_nodes=("Glow",))
+        op.transport = "console"
+        with patch.object(Tool, "SetInput", return_value=True):
+            with self.assertRaises(OperationError):
+                op._op_animate_zoom({"item_id": item, "end_zoom": 1.3})
+        self.assertEqual(comp.chain(), ["Glow1", "MediaIn1"])
+        self.assertIsNone(comp.FindTool("AIBridgeZoom"))
 
 
 if __name__ == "__main__":

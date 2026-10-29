@@ -31,7 +31,9 @@ if (args[0] === '--serve') {
   [command, ...childArgs] = selected;
   childArgs.push(join(root, 'install.py'), ...args);
 }
-const child = spawn(command, childArgs, { stdio: 'inherit' });
+const childEnv = { ...process.env };
+if (args[0] === '--serve') childEnv.RESOLVE_AI_BRIDGE_HOME = process.env.RESOLVE_AI_BRIDGE_HOME || join(homedir(), '.resolve-ai-bridge');
+const child = spawn(command, childArgs, { stdio: 'inherit', env: childEnv });
 child.on('error', (error) => { console.error(`Could not start Resolve AI Bridge: ${error.message}`); process.exit(1); });
 child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));
 for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => child.kill(signal));

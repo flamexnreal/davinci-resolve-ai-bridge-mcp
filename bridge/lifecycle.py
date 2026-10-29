@@ -16,6 +16,32 @@ UNKNOWN_RECORD_MAX_AGE = 30 * 86400  # "running" records explain an unknown outc
 LOG_MAX_BYTES = 1024 * 1024
 
 
+def private_directory(path):
+    """Keep local requests and their authentication material owner-only."""
+    path = Path(path)
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name != "nt":
+        path.chmod(0o700)
+
+
+def atomic_json(path, data, indent=None):
+    """Write private JSON atomically, including the temporary file's first byte."""
+    path = Path(path)
+    temp = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
+    fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=True, indent=indent)
+            handle.flush()
+            try:
+                os.fsync(handle.fileno())
+            except OSError:
+                pass
+        os.replace(str(temp), str(path))
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def load_token(path):
     """Return the shared queue token, creating it owner-only (0600) if it is missing.
 
@@ -23,11 +49,13 @@ def load_token(path):
     Resolve worker can never start with different tokens.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_directory(path.parent)
     for _ in range(40):
         try:
             value = path.read_text(encoding="utf-8").strip()
             if value:
+                if os.name != "nt":
+                    path.chmod(0o600)
                 return value
         except FileNotFoundError:
             token = "rab_" + secrets.token_urlsafe(32)
@@ -153,18 +181,7 @@ def request_stop(home):
     if not state.get("menu_lifecycle"):
         raise RuntimeError("This older worker must be stopped in its Py3 Console or by closing Resolve.")
     token = (home / "token.txt").read_text(encoding="utf-8").strip()
-    target = home / "stop.json"
-    temp = home / (".stop.%s.tmp" % uuid.uuid4().hex)
-    try:
-        with temp.open("w", encoding="utf-8") as handle:
-            json.dump({"session": state["session"], "token": token}, handle)
-        try:
-            temp.chmod(0o600)
-        except OSError:
-            pass
-        os.replace(temp, target)
-    finally:
-        temp.unlink(missing_ok=True)
+    atomic_json(home / "stop.json", {"session": state["session"], "token": token})
     return True
 
 

@@ -1,5 +1,65 @@
 # Release Notes
 
+## v1.13.1 — Editing and installer fixes; Free compatibility notice (2026-10-29)
+
+Positioned AV imports retain their audio, image insertion returns the actual
+new clip, and reconstruction verifies restored transforms before claiming
+success. This is a bug-fix release for the existing Python connector.
+
+**Resolve Free 21.1.2 is unsupported.** Live macOS testing on Free 21.1.2.10
+confirmed the investigated Lua connector cannot start in either Console or menu
+scripts: its required file-loading and FFI facilities are absent. That prototype
+is excluded from this stable release. Reinstalling Python does not restore Py3.
+See [compatibility evidence](docs/COMPATIBILITY.md).
+
+### Fixed
+
+- Positioned media insertion no longer forces video-only mode and discards
+  audio. `append_media` exposes an optional `media_type` for intentional
+  video-only/audio-only placement; missing audio tracks respect `create_track`.
+- Imports and reconstructed segments use Resolve's exclusive source end frame,
+  preserving all 192 frames of the live eight-second test clip instead of 191.
+- `add_image` returns the created clip's stable ID even when a later clip
+  already exists. Duration warnings cover both shorter and longer results.
+- Duplicate verification activates each timeline before checking track flags;
+  inactive timelines can report false enabled states. Read-only comparison
+  omits enabled/locked flags and explicitly states that limitation.
+- Splits and silence cleanup read restored transforms back. Rejected setters
+  for already-matching defaults no longer cause a false failure; mismatches
+  still fail and retain the checkpoint/original for recovery.
+- Silence cleanup converts serialized marker positions back to numeric frames.
+- Fusion effect resets recognize the bridge's own speed node, preserving its
+  connections and user effects. Lua runtime errors are returned in tool errors.
+- The Python Console/menu worker uses native Fusion input/modifier APIs for
+  effects. It no longer waits on Lua queued behind a resident script worker.
+  Native setters returning no value are verified by readback, including the
+  static zoom fallback.
+- Private FFmpeg paths survive staging activation and updates. Staged server
+  validation uses the staged runtime, rather than the live installation.
+- Generated launchers and client registrations retain the private venv Python
+  path and custom runtime home, including paths with spaces.
+- Queue JSON and Stop requests are owner-only from creation on POSIX. Existing
+  token/runtime permissions are repaired, and installer output no longer prints
+  the token.
+- Updated website development dependencies; npm audit reports zero vulnerabilities.
+
+### Validation and limits
+
+- 131 automated tests ran on macOS/Python 3.14.6: 125 passed, 6 PowerShell cases
+  skipped because PowerShell was unavailable. Fusion-generated Lua ran in the
+  optional `lupa` runtime. Website build, TypeScript, dependency audit and real
+  npm tarball checks passed. GitHub Actions now checks Linux, macOS and Windows.
+- Live Python worker on macOS Free 21.0.3.7, using synthetic media in an isolated
+  test library: full-duration AV import, image placement/IDs, preview/original
+  isolation, transform readback, split checkpoints, source frame/audio decoding,
+  stereo/silence analysis, cleanup/stale-review refusal, five Fusion effects,
+  speed changes and effect resets passed. Doctor reported zero failures and a
+  direct-attach warning while the Console route was working. Earlier Lua
+  investigation results are recorded separately in docs/COMPATIBILITY.md.
+- Resolve created default 120-frame stills when 24 were requested; results
+  report this limitation. Render completion, Studio, Windows/Linux live Resolve,
+  large timelines and performance under load are not certified by these checks.
+
 ## v1.13.0 — Stackable Fusion effects, render progress and Free checks (2026-10-17)
 
 Fusion effects now work together instead of replacing each other, renders can be followed to the end, and `project_health` warns before Resolve Free hits its delivery limits. No Studio-only features were added.

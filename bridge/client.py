@@ -39,7 +39,7 @@ class BridgeCallError(BridgeError):
 
 def _ensure_dirs():
     for path in (HOME, INBOX, OUTBOX):
-        path.mkdir(parents=True, exist_ok=True)
+        lifecycle.private_directory(path)
 
 
 def _token():
@@ -66,16 +66,7 @@ def _read_json(path):
 
 
 def _atomic_json(path, data):
-    path = Path(path)
-    temp = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=True)
-        handle.flush()
-        try:
-            os.fsync(handle.fileno())
-        except OSError:
-            pass
-    os.replace(str(temp), str(path))
+    lifecycle.atomic_json(path, data)
 
 
 def heartbeat(max_age=25.0):
@@ -117,8 +108,7 @@ def call(operation, params=None, timeout=30.0):
         not observed or observed.get("session") != worker.get("session")
     ):
         raise BridgeCallError("Inspect status or timeline_overview in this client before editing.")
-    INBOX.mkdir(parents=True, exist_ok=True)
-    OUTBOX.mkdir(parents=True, exist_ok=True)
+    _ensure_dirs()
     request_id = uuid.uuid4().hex
     request_path = INBOX / (request_id + ".json")
     response_path = OUTBOX / (request_id + ".json")

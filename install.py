@@ -16,7 +16,7 @@ from pathlib import Path
 
 
 from bridge.operations import AGENT_VERSION as VERSION
-from bridge.lifecycle import WorkerLock, load_token, replace_token
+from bridge.lifecycle import WorkerLock, load_token, replace_token, private_directory
 ROOT = Path(__file__).resolve().parent
 HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 TOKEN_FILE = HOME / "token.txt"
@@ -54,9 +54,9 @@ def venv_python():
 
 def copy_runtime():
     """Copy into a staging directory, never remove a working bridge."""
-    HOME.mkdir(parents=True, exist_ok=True)
+    private_directory(HOME)
     for folder in ("inbox", "outbox", "logs"):
-        (HOME / folder).mkdir(exist_ok=True)
+        private_directory(HOME / folder)
     shutil.copy2(ROOT / "agent" / "ResolveConsole.py", HOME / "ResolveConsole.py")
     shutil.copytree(ROOT / "bridge", HOME / "bridge",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
@@ -109,12 +109,15 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
             install_source_decoder()
         if not skip:
             subprocess.run([str(venv_python()), "-c", "import mcp; import bridge.server"],
-                           cwd=stage, check=True)
+                           cwd=stage, check=True,
+                           env=dict(os.environ, RESOLVE_AI_BRIDGE_HOME=str(stage)))
         # Preserve local state only after staging has succeeded. Updates require
         # stopped clients: copying a live queue cannot be made transactional.
         if destination.exists():
             for item in destination.iterdir():
                 if item.name not in {"bridge", "ResolveConsole.py", ".venv", "agent.json", "worker.lock", "stop.json"}:
+                    if with_ffmpeg and item.name == "ffmpeg-path.txt":
+                        continue
                     target = stage / item.name
                     if item.is_dir():
                         shutil.copytree(item, target, dirs_exist_ok=True)
@@ -177,8 +180,9 @@ def install_dependencies(skip=False):
 
 def write_configs(token=None):
     entry = {
-        "command": str(venv_python().resolve()),
+        "command": str(venv_python().absolute()),
         "args": [str((HOME / "bridge" / "server.py").resolve())],
+        "env": {"RESOLVE_AI_BRIDGE_HOME": str(HOME.absolute())},
     }
     config = {"mcpServers": {"resolve-ai-bridge": entry}}
     (HOME / "mcp-server-entry.json").write_text(json.dumps(entry, indent=2) + "\n", encoding="utf-8")
@@ -211,6 +215,13 @@ def write_configs(token=None):
             shlex.quote(entry["command"]),
             shlex.quote(entry["args"][0]),
         )
+    home_arg = "RESOLVE_AI_BRIDGE_HOME=%s" % HOME.absolute()
+    if os.name == "nt":
+        home_arg = "'" + home_arg.replace("'", "''") + "'"
+    else:
+        home_arg = shlex.quote(home_arg)
+    codex_line = codex_line.replace("codex mcp add resolve-ai-bridge -- ",
+                                   "codex mcp add resolve-ai-bridge --env " + home_arg + " -- ", 1)
     (HOME / "codex-command.txt").write_text(codex_line + "\n", encoding="utf-8")
     (HOME / "claude-command.txt").write_text(claude_line + "\n", encoding="utf-8")
     return entry, config, claude_line, codex_line
@@ -226,7 +237,12 @@ def install_source_decoder():
     binary = Path(result.stdout.strip())
     if not binary.is_file():
         fail("The optional FFmpeg package did not provide an executable.")
-    (HOME / "ffmpeg-path.txt").write_text(str(binary) + "\n", encoding="utf-8")
+    # Activation renames staging: bundled executables must remain relative.
+    try:
+        configured = binary.relative_to(HOME)
+    except ValueError:
+        configured = binary
+    (HOME / "ffmpeg-path.txt").write_text(str(configured) + "\n", encoding="utf-8")
     print("      Configured the private FFmpeg source decoder.")
 
 
@@ -363,9 +379,10 @@ def install_global_launcher():
         try:
             target_dir.mkdir(parents=True, exist_ok=True)
             batch = target_dir / "resolve-ai-bridge.cmd"
-            script_content = '@echo off\r\n"%s" "%s" %%*\r\n' % (
-                venv_python().resolve(),
-                (HOME / "bridge" / "server.py").resolve(),
+            script_content = '@echo off\r\nsetlocal\r\nset "RESOLVE_AI_BRIDGE_HOME=%s"\r\n' % str(HOME.absolute()).replace('%', '%%')
+            script_content += '"%s" "%s" %%*\r\n' % (
+                str(venv_python().absolute()).replace('%', '%%'),
+                str((HOME / "bridge" / "server.py").resolve()).replace('%', '%%'),
             )
             batch.write_text(script_content, encoding="utf-8")
             launcher_paths.append(str(batch))
@@ -380,9 +397,10 @@ def install_global_launcher():
             try:
                 target_dir.mkdir(parents=True, exist_ok=True)
                 launcher = target_dir / "resolve-ai-bridge"
-                script_content = '#!/bin/sh\nexec "%s" "%s" "$@"\n' % (
-                    venv_python().resolve(),
-                    (HOME / "bridge" / "server.py").resolve(),
+                script_content = '#!/bin/sh\nexport RESOLVE_AI_BRIDGE_HOME=%s\n' % shlex.quote(str(HOME.absolute()))
+                script_content += 'exec %s %s "$@"\n' % (
+                    shlex.quote(str(venv_python().absolute())),
+                    shlex.quote(str((HOME / "bridge" / "server.py").resolve())),
                 )
                 launcher.write_text(script_content, encoding="utf-8")
                 launcher.chmod(0o755)
@@ -500,8 +518,10 @@ def auto_configure_clients(entry):
     # 6. Codex CLI
     if shutil.which("codex"):
         try:
+            env_args = [part for key, value in entry.get("env", {}).items()
+                        for part in ("--env", "%s=%s" % (key, value))]
             res = subprocess.run(
-                ["codex", "mcp", "add", "resolve-ai-bridge", "--", entry["command"], entry["args"][0]],
+                ["codex", "mcp", "add", "resolve-ai-bridge", *env_args, "--", entry["command"], entry["args"][0]],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -571,6 +591,8 @@ def main():
     print("\nResolve AI Bridge installer %s" % VERSION)
     print("Runtime: %s" % HOME)
     print("System:  %s %s\n" % (platform.system(), platform.release()))
+    print("Compatibility: Python startup is verified on macOS Resolve Free 21.0.3.7.")
+    print("Resolve Free 21.1+ removed Python scripting; this release does not support Free 21.1.2.\n")
 
     prepare_runtime(skip=args.skip_deps, with_ffmpeg=args.with_ffmpeg)
     print("[0/5] Activated validated runtime; previous installation retained.")
@@ -651,7 +673,7 @@ def main():
     print("\nVERIFY  python3 tools/doctor.py")
     print("        Then ask your AI: \"Call resolve_status and tell me what is open.\"")
 
-    print("\nLocal Token: %s (auto-managed at %s)" % (token, TOKEN_FILE))
+    print("\nLocal token is stored privately at %s" % TOKEN_FILE)
     print("Authentication between bridge and Resolve is 100% automatic locally.")
     if not shutil.which("node"):
         print("\nHEAVILY RECOMMENDED: install the current Node.js LTS release for Remotion.")

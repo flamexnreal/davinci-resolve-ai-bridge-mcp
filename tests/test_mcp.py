@@ -17,6 +17,9 @@ from mcp.types import ImageContent, TextContent
 async def check():
     tools = await server.mcp.list_tools()
     names = {tool.name for tool in tools}
+    append = next(tool for tool in tools if tool.name == 'append_media')
+    schema = getattr(append, 'inputSchema', None) or getattr(append, 'input_schema', None)
+    assert 'media_type' in schema['properties'], schema
     assert {'preview_timeline','compare_timelines','project_health','bridge_capabilities','review_silence','apply_silence_cuts','render_status','inspect_fusion'} <= names
     payload = json.dumps({'ok': True, 'result': {'format':'png','image_base64':base64.b64encode(b'image-fixture').decode(),'width':1,'height':1}})
     with patch.object(server, '_result', return_value=payload):

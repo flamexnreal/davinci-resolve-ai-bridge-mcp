@@ -132,7 +132,23 @@ class Tool:
         inp = self.inputs.get(name)
         if inp is None:
             return False
-        inp.value = value
+        if inp.keys is not None and time is not None:
+            inp.keys[time] = value
+        else:
+            inp.value = value
+        return None  # Native Fusion setters can succeed without a return value.
+
+    def AddModifier(self, name, kind):
+        inp = self.inputs.get(name)
+        if inp is None:
+            return False
+        if kind == "BezierSpline":
+            inp.keys = {}
+        elif kind == "XYPath":
+            inp.path = self.comp.AddTool(kind)
+            inp.source = inp.path.main_output
+        else:
+            return False
         return True
 
     def Delete(self):

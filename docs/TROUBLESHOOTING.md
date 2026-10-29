@@ -2,6 +2,15 @@
 
 Run `python3 tools/doctor.py` on macOS or `py tools/doctor.py` on Windows before changing files. With Resolve open it reports which transport is live and round-trips a real request.
 
+## Resolve Free 21.1+ has no Py3 tab
+
+Python scripting moved to Studio in 21.1. This release does **not** support
+Free 21.1.2. Live macOS testing on Free 21.1.2.10 also found that the investigated
+Lua connector could not load: both Console and menu scripts lacked `dofile`,
+`loadfile` and FFI. Installing Python again or enabling external access does not
+repair that restriction. Startup is verified on Free 21.0.3.7; see
+[compatibility evidence](COMPATIBILITY.md) before changing Resolve versions.
+
 ## The One-Line Installer Downloads but Stops
 
 Older shell installers expected the repository's previous folder name. Rerun the current [one-line install command](../README.md#option-b-one-line-shell-install); it now finds the extracted project by its `install.py` file. Download progress alone does not mean installation finished—wait for **INSTALL COMPLETE**.

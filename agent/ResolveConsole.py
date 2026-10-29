@@ -62,20 +62,11 @@ PROTOCOL_VERSION = operations.PROTOCOL_VERSION
 
 def _ensure_dirs():
     for path in (HOME, INBOX, OUTBOX, LOGS):
-        path.mkdir(parents=True, exist_ok=True)
+        lifecycle.private_directory(path)
 
 
 def _atomic_json(path, data):
-    path = Path(path)
-    temp = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
-    with temp.open("w", encoding="utf-8") as handle:
-        json.dump(data, handle, ensure_ascii=True, indent=2)
-        handle.flush()
-        try:
-            os.fsync(handle.fileno())
-        except OSError:
-            pass
-    os.replace(str(temp), str(path))
+    lifecycle.atomic_json(path, data, indent=2)
 
 
 def _read_json(path):
@@ -161,7 +152,7 @@ class ResolveRuntime:
         self.session = uuid.uuid4().hex
         self.snapshot = {}
         self.state = {"state": "idle", "busy": False}
-        (HOME / "requests").mkdir(exist_ok=True)
+        lifecycle.private_directory(HOME / "requests")
 
     def log(self, message):
         try:
@@ -240,7 +231,7 @@ class ResolveRuntime:
             "codex mcp add resolve-ai-bridge -- %s"
             % launch
         )
-        print("\nLocal Token: %s (auto-managed at %s)" % (self.token, TOKEN_FILE))
+        print("\nLocal token is stored privately at %s" % TOKEN_FILE)
         print("")
 
     # Kept as an alias so older instructions and screenshots still work.

@@ -11,8 +11,8 @@ view:
 ``console``
     The authenticated file queue in ``~/.resolve-ai-bridge``. A small worker
     started from Resolve's own Console (or the Workspace > Scripts menu) does
-    the work. This always works, including on builds or preference settings
-    that refuse an external attach.
+    the work on Python-enabled builds. Resolve Free 21.1+ removed Python
+    scripting; this release does not support Free 21.1.2.
 
 Set ``RESOLVE_AI_BRIDGE_MODE`` to ``direct``, ``console``, or ``auto``
 (default) to override the choice.
@@ -124,5 +124,6 @@ def offline_help():
         "Resolve is not reachable. %s Open DaVinci Resolve with a project. If tools still fail, "
         "start the worker from Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, or paste "
         "the line in ~/.resolve-ai-bridge/console-command.txt into Workspace > Console (Py3)."
+        " Resolve Free 21.1+ removed Python scripting; Free 21.1.2 is unsupported by this release."
         % reason
     )

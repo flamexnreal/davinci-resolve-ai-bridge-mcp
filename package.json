@@ -1,6 +1,6 @@
 {
   "name": "davinci-resolve-ai-bridge-mcp",
-  "version": "1.13.0",
+  "version": "1.13.1",
   "description": "A local MCP bridge that lets AI coding assistants (Antigravity, Claude, Cursor, Codex) view and edit the project open in DaVinci Resolve",
   "type": "module",
   "bin": {
@@ -55,7 +55,7 @@
     "@vitejs/plugin-react": "5.1.1",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
-    "vite": "7.3.2",
+    "vite": "7.3.7",
     "vite-plugin-singlefile": "2.3.0",
     "clsx": "2.1.1",
     "framer-motion": "^12.42.2",

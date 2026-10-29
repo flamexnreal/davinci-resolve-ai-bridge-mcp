@@ -19,7 +19,7 @@ Before analyzing audio, generating subtitles/captions, rendering motion graphics
 
 ## Required Workflow
 
-1. Call `resolve_status` before every editing session. It reports which transport is live. If offline, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per Resolve session. On the tested macOS Free build it starts directly; use the portable Py3 Console line only if automatic startup fails.
+1. Call `resolve_status` before every editing session. This release does not support Free 21.1.2. Python startup is verified on macOS Free 21.0.3.7; Free 21.1+ removed Python scripting. On Python-enabled builds, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. Use the portable Py3 Console line only if automatic startup fails and Py3 exists.
 2. Call `timeline_overview` before proposing an edit.
 3. Summarize what is open and identify ambiguities.
 4. State a short plan before changing the timeline.

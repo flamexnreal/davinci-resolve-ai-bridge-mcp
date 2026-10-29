@@ -91,11 +91,11 @@ const faq = [
   },
   {
     q: "Do I have to redo a step every time I open Resolve?",
-    a: "In Resolve Free, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. It starts the worker without a Console paste on supported builds. Menu startup is verified on macOS Free 21.0.3.7; other builds retain the Py3 Console fallback.",
+    a: "On Python-enabled builds, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge once per session. Startup is verified on macOS Free 21.0.3.7. Free 21.1+ removed Python scripting, and this release does not support Free 21.1.2.",
   },
   {
     q: "Does this work on free DaVinci Resolve?",
-    a: "Yes, the Free workflow uses the connection Resolve supplies to its internal scripts. Review tools use ordinary timeline APIs, not Studio AI features. Individual operations still depend on your Resolve build; source capture excludes timeline effects and needs FFmpeg.",
+    a: "It supports Python-enabled Free builds, with startup verified on macOS Free 21.0.3.7. This release does not support Free 21.1.2: live testing also found the investigated Lua connector could not start there. Review tools use ordinary APIs; Studio-only features stay unavailable on Free.",
   },
   {
     q: "Why did my image only last one frame?",
@@ -254,7 +254,7 @@ export default function App() {
         </Reveal>
         <Reveal className="mt-10 flex items-start gap-4 bg-[#e8edf5] px-5 py-5 sm:px-7">
           <Icon name="help" className="mt-0.5 h-5 w-5 shrink-0 text-blue-700" />
-          <p className="max-w-4xl text-sm leading-6 text-slate-700"><strong>Important:</strong> both routes work on free DaVinci Resolve, and the bridge falls back automatically when a direct attach is refused. Resolve versions and operating systems vary, so the included doctor check is the source of truth on your machine. A successful web build does not prove that a given Resolve API call works on your exact Resolve version.</p>
+          <p className="max-w-4xl text-sm leading-6 text-slate-700"><strong>Check your Free version:</strong> startup is verified on macOS Free 21.0.3.7. Free 21.1+ removed Python scripting. This release does not support Free 21.1.2; the investigated Lua connector also failed to start on that build. Reinstalling Python will not restore the missing Py3 tab. See the <a className="underline" href="https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/blob/main/docs/COMPATIBILITY.md">compatibility evidence</a>.</p>
         </Reveal>
       </section>
 
