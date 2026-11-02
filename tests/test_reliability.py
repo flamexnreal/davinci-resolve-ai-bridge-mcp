@@ -74,6 +74,25 @@ class ReliabilityTests(unittest.TestCase):
             self.assertEqual(transport.call("status"), ({}, "console"))
             queue.assert_called_once()
 
+    def test_forced_direct_never_dispatches_to_queue(self):
+        for failure in (None, RuntimeError("native attach failed")):
+            with self.subTest(failure=failure), \
+                    patch.dict(os.environ, RESOLVE_AI_BRIDGE_MODE="direct"), \
+                    patch.object(transport, "direct_operations", return_value=None, side_effect=failure), \
+                    patch.object(transport.direct, "reset"), \
+                    patch.object(client, "call") as queue:
+                with self.assertRaisesRegex(client.BridgeOffline, "direct"):
+                    transport.call("add_marker")
+                queue.assert_not_called()
+
+    def test_forced_direct_does_not_report_console_as_active(self):
+        with patch.dict(os.environ, RESOLVE_AI_BRIDGE_MODE="direct"), \
+                patch.object(transport.direct, "probe", return_value={"ok": False}), \
+                patch.object(transport.lua_transport, "probe", return_value={"connected": True}):
+            report = transport.describe()
+        self.assertTrue(report["console_worker"]["online"])
+        self.assertEqual(report["active"], "none")
+
     def test_expired_and_switched_context(self):
         for name, changes in [("expired", {"deadline": time.time() - 1}),
                               ("timeline", {"context": {"project_id": "p1", "timeline_id": "t2"}}),

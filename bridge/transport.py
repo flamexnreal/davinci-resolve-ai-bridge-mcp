@@ -95,13 +95,15 @@ def describe():
         },
         "lua_worker": lua,
         "active": "lua" if use_lua and lua.get("connected") else
-                  ("direct" if probe.get("ok") else ("console" if console and not use_lua else "none")),
+                  ("direct" if probe.get("ok") else
+                   ("console" if console and selected_mode in ("auto", "console", "queue") else "none")),
     }
 
 
 def call(operation, params=None, timeout=30.0):
     """Run one operation over whichever transport is available."""
-    if mode() == "lua" or (mode() == "auto" and lua_transport.probe().get("connected")):
+    selected_mode = mode()
+    if selected_mode == "lua" or (selected_mode == "auto" and lua_transport.probe().get("connected")):
         # Never fall through after Lua dispatch: an uncertain edit is not replayed.
         return lua_transport.call(operation, params or {}, timeout=timeout), "lua"
     try:
@@ -123,11 +125,22 @@ def call(operation, params=None, timeout=30.0):
                 "already changed Resolve. Inspect before retrying; no Console replay was sent." % exc
             ) from exc
 
+    if selected_mode == "direct":
+        raise client.BridgeOffline(
+            "Direct attach is unavailable with RESOLVE_AI_BRIDGE_MODE=direct. "
+            "No worker fallback was sent. Use auto mode to allow a Lua or Console worker."
+        )
     return client.call(operation, params or {}, timeout=timeout), "console"
 
 
 def offline_help():
     """A single actionable sentence for when neither transport is available."""
+    if mode() == "direct":
+        return (
+            "Open Resolve and check direct scripting availability (Studio: Preferences > System > "
+            "General > External scripting using > Local). RESOLVE_AI_BRIDGE_MODE=direct disables "
+            "worker fallback; set it to auto to use a Lua or Console worker."
+        )
     probe = direct.probe()
     reason = probe.get("reason") or "Direct attach is unavailable."
     return (

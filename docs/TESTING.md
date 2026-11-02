@@ -29,6 +29,12 @@ The standard-library unit tests use in-memory Resolve API doubles and synthetic 
 
 The doctor is a separate installed-runtime diagnostic. It can make a read-only status round trip to Resolve. A missing/stopped Console worker is a runtime warning, not proof of a code failure.
 
+Retention regressions cover Lua-only operation cleanup, bounded cleanup frequency,
+and 30-day retention of both crashed `running` records and explicit `unknown`
+outcomes. Transport regressions ensure pinned direct mode never dispatches to
+a worker or reports one as its active route. These checks use temporary runtimes
+and simulated Resolve objects.
+
 ## Shell installer regressions
 
 `tests/test_bootstrap.py` runs the actual `install.ps1` and `install.sh` against temporary ZIP/tar fixtures and a harmless Python installer. It covers the current archive folder name, renamed folders, Python/downloader fallbacks, argument forwarding, invalid archives, failed downloads, nonzero installer exits, and temporary-file cleanup. PowerShell also checks the documented `Invoke-Expression` route and restores the caller's working folder. Downloads are mocked; extraction and Python execution are real. No Resolve files or client settings are changed.

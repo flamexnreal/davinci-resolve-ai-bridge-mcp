@@ -12,7 +12,7 @@ import uuid
 # Retention for files the queue leaves behind (seconds).
 OUTBOX_MAX_AGE = 3600           # unread replies: no client waits longer than a few minutes
 REQUEST_RECORD_MAX_AGE = 7 * 86400
-UNKNOWN_RECORD_MAX_AGE = 30 * 86400  # "running" records explain an unknown outcome; keep longer
+UNKNOWN_RECORD_MAX_AGE = 30 * 86400  # Running/crashed and explicit unknown outcomes need longer recovery.
 LOG_MAX_BYTES = 1024 * 1024
 
 
@@ -105,10 +105,10 @@ def prune_runtime(home, now=None):
         if not old(path, REQUEST_RECORD_MAX_AGE):
             continue
         try:
-            running = json.loads(path.read_text(encoding="utf-8")).get("state") == "running"
+            unknown = json.loads(path.read_text(encoding="utf-8")).get("state") in ("running", "unknown")
         except (OSError, ValueError, AttributeError):
-            running = False
-        if running and not old(path, UNKNOWN_RECORD_MAX_AGE):
+            unknown = False
+        if unknown and not old(path, UNKNOWN_RECORD_MAX_AGE):
             continue
         path.unlink(missing_ok=True)
         removed += 1

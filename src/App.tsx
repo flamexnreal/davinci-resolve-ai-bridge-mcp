@@ -85,7 +85,7 @@ const providers: Record<Provider, { title: string; steps: string[] }> = {
 const faq = [
   {
     q: "How do I turn the bridge off?",
-    a: "Disconnect or disable the resolve-ai-bridge MCP server in your AI client. That removes the tools entirely. If a Console worker is running, also choose Workspace > Scripts > Resolve AI Bridge > Stop AI Bridge, or quit Resolve.",
+    a: "Disconnect or disable the resolve-ai-bridge MCP server in your AI client. In Resolve, choose Workspace > Scripts > Resolve AI Bridge > Stop AI Bridge (Lua) for the Lua worker, or Stop AI Bridge for the Python worker. Stop waits for the active operation to finish. Quitting Resolve also ends its worker.",
   },
   {
     q: "Do I still have to replace YOUR_NAME anywhere?",
@@ -423,14 +423,14 @@ export default function App() {
       <section id="editing" className="page-section py-24 sm:py-32">
         <div className="page-section">
           <Reveal>
-            <SectionIntro number="06 / Timeline editing" title="Scale, animate, and cut the clips you already placed." text="Point your AI at a clip by its id, such as V1.2, or just say the clip under the playhead. It can reframe it, push in or pull out over time, and razor it in two, so the repetitive parts of an edit are automated." />
+            <SectionIntro number="06 / Timeline editing" title="Scale, animate, and cut the clips you already placed." text="Use the stable clip id from timeline_overview, or ask for the clip under the playhead. Labels such as V1.2 describe a position and can change after edits. Try a reframe, an animated zoom, or a supported split on a preview timeline first." />
           </Reveal>
           <Reveal className="mt-14 section-grid">
             <div className="space-y-5 text-sm leading-6 text-slate-600">
-              <p className="section-number">What is new in 1.2</p>
-              <p><code>set_clip_transform</code> now scales on both axes, adds scaling mode, resize filter, retime and motion-estimation controls, and accepts <code>item_id="playhead"</code> so the AI can act on the clip you are looking at.</p>
+              <p className="section-number">Editing behavior</p>
+              <p><code>set_clip_transform</code> scales on both axes, supports scaling mode, resize filter, retime and motion-estimation controls, and accepts <code>item_id="playhead"</code> so the AI can act on the clip you are looking at.</p>
               <p><code>animate_zoom</code> builds a Fusion composition on the clip and keyframes its size, so a push-in actually plays back. It reports whether keyframes were created and falls back to a static zoom on builds that refuse scripted keyframes, rather than pretending.</p>
-              <p><code>split_clip</code> cuts a clip in two at a frame, a timecode, or the playhead. Resolve's scripting API has no razor, so the clip is rebuilt as two pieces that keep their source frames and transform. Color grades and Fusion comps on the original are not copied onto the halves, and the reply says so.</p>
+              <p><code>split_clip</code> retains a verified checkpoint before rebuilding a normal-speed clip into two pieces at a frame, timecode, or the playhead. It preserves source ranges, static transforms, enabled state, clip color and the current grade layer. Fusion clips, locked tracks, mixed frame rates and known retiming are refused. Audio links, fades, keyframes, other grade layers and metadata are not guaranteed; review the result against the checkpoint.</p>
             </div>
             <div className="max-w-3xl">
               <CopyBlock code={editingPrompt} label="Prompt for any MCP client" />
@@ -438,7 +438,7 @@ export default function App() {
                 {[
                   ["set_clip_transform", "Static reframe: scale, pan, tilt, rotate, crop, fade, blend, scaling mode, and resize filter, by id or at the playhead."],
                   ["animate_zoom", "Animated scale over time via a Fusion comp. Set start and end zoom and the frame range within the clip."],
-                  ["split_clip", "Razor a clip in two at a frame, timecode, or the playhead, rebuilt from Resolve's documented append API."],
+                  ["split_clip", "Rebuild a supported clip into two parts at a frame, timecode, or the playhead, with a retained checkpoint."],
                 ].map(([title, text], index) => (
                   <div key={title} className="border-t border-slate-400 pt-4"><span className="font-mono text-xs text-blue-700">0{index + 1}</span><h4 className="mt-3 font-mono text-sm font-semibold">{title}</h4><p className="mt-2 text-sm leading-6 text-slate-600">{text}</p></div>
                 ))}
