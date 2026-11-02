@@ -74,11 +74,13 @@ class QueueHygieneTests(unittest.TestCase):
         old_record = write("requests/old.json", {"state": "completed"}, 8 * 86400)
         unknown = write("requests/unknown.json", {"state": "running"}, 8 * 86400)
         ancient_unknown = write("requests/ancient.json", {"state": "running"}, 31 * 86400)
+        lua_unknown = write("requests/lua-unknown.json", {"state": "unknown"}, 8 * 86400)
+        ancient_lua_unknown = write("requests/lua-ancient.json", {"state": "unknown"}, 31 * 86400)
         log = self.home / "logs" / "agent.log"
         log.write_bytes(b"x" * (lifecycle.LOG_MAX_BYTES + 1))
-        self.assertEqual(lifecycle.prune_runtime(self.home, now), 3)
-        self.assertTrue(fresh_reply.exists() and fresh_record.exists() and unknown.exists())
-        self.assertFalse(old_reply.exists() or old_record.exists() or ancient_unknown.exists())
+        self.assertEqual(lifecycle.prune_runtime(self.home, now), 4)
+        self.assertTrue(fresh_reply.exists() and fresh_record.exists() and unknown.exists() and lua_unknown.exists())
+        self.assertFalse(old_reply.exists() or old_record.exists() or ancient_unknown.exists() or ancient_lua_unknown.exists())
         self.assertFalse(log.exists())
         self.assertTrue((self.home / "logs" / "agent.log.1").exists())
 

@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from bridge import client, lifecycle, lua_transport, transport
 
@@ -132,6 +132,35 @@ class FileTransportTests(unittest.TestCase):
         self.home = Path(self.temp.name)
         (self.home / "token.txt").write_text(TOKEN)
         lifecycle.atomic_json(self.home / "lua-outbox.json", {})
+
+    def test_operations_clean_stale_records_without_losing_unknown_outcomes(self):
+        records = self.home / "requests"
+        records.mkdir()
+        old = records / "old-completed.json"
+        unknown = records / "unknown.json"
+        for path, state in ((old, "completed"), (unknown, "unknown")):
+            lifecycle.atomic_json(path, {"state": state})
+            stamp = time.time() - 8 * 86400
+            os.utime(path, (stamp, stamp))
+        ops = Mock()
+        ops.queue_context.return_value = {"project_id": "p", "timeline_id": "t"}
+        ops.dispatch.return_value = {"online": True}
+        with patch.object(client, "HOME", self.home), \
+                patch.object(lua_transport.LuaClient, "health"), \
+                patch.object(lua_transport.LuaClient, "request"), \
+                patch.object(lua_transport, "ResolveOperations", return_value=ops), \
+                patch.object(lua_transport, "_observed", None), \
+                patch.object(lua_transport, "_last_cleanup", (None, 0.0)), \
+                patch.object(lua_transport.time, "monotonic", side_effect=[10, 11, 611]), \
+                patch.object(lifecycle, "prune_runtime", wraps=lifecycle.prune_runtime) as cleanup:
+            self.assertEqual(lua_transport.call("status"), {"online": True})
+            lua_transport.call("status")
+            self.assertEqual(cleanup.call_count, 1)
+            lua_transport.call("status")
+            self.assertEqual(cleanup.call_count, 2)
+        self.assertFalse(old.exists())
+        self.assertTrue(unknown.exists())
+        self.assertEqual(len(list(records.glob("*.json"))), 4)
 
     def test_heartbeat_requires_signature_and_fresh_live_session(self):
         value = {"time": time.time(), "session": "current", "active": True}

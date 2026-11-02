@@ -1,5 +1,38 @@
 # Release Notes
 
+## v1.14.1 — Lua recovery cleanup and transport fixes (2026-11-01)
+
+This maintenance release fixes request-record retention and respects explicit
+transport selection. It keeps the existing editing tools and compatibility scope.
+
+### Fixed
+
+- Lua-only sessions now clean expired request records on tool calls, at most
+  once per ten minutes per MCP process/runtime. Completed/failed records expire
+  after seven days; crashed `running` records and explicit `unknown` outcomes
+  remain for 30 days so uncertain edits can still be investigated.
+- `RESOLVE_AI_BRIDGE_MODE=direct` now reports offline when direct attach is
+  unavailable, without dispatching to a Console worker. Status no longer reports
+  a worker excluded by that mode as active. Auto-mode pre-dispatch fallback is
+  unchanged.
+- Offline startup guidance points current Free users to the Lua launcher.
+  Website and troubleshooting copy now identify the correct Stop command,
+  distinguish stable IDs from positional labels, and describe checkpointed
+  splits and current-grade-layer preservation accurately.
+
+### Validation and limits
+
+146 automated tests ran locally: 140 passed and six PowerShell cases skipped
+because PowerShell is unavailable. MCP SDK and actual Lua protocol tests ran.
+GitHub Actions passed on macOS, Linux and Windows for the fixes. Website build,
+package check and dependency audit passed; an isolated installed runtime's
+`doctor.py --offline` reported zero failures with workers stopped.
+
+These maintenance changes have not been tested against a live Resolve instance.
+The existing measured compatibility and reconstruction/source-decoding limits
+remain documented in [COMPATIBILITY.md](docs/COMPATIBILITY.md). No additional
+platform, Studio, rendering or large-timeline compatibility is claimed.
+
 ## v1.14.0 — Restore current Resolve Free workflows with native Lua (2026-10-29)
 
 Free 21.1+ removed Python inside Resolve. The new Lua connector restores the

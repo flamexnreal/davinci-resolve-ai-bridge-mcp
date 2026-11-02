@@ -90,10 +90,10 @@ def require_online():
     data = heartbeat()
     if data is None:
         raise BridgeOffline(
-            "The Resolve Console worker is not running. In Resolve choose Workspace > Scripts > "
-            "Resolve AI Bridge > Start AI Bridge, or paste the single line saved in "
-            "~/.resolve-ai-bridge/console-command.txt into Workspace > Console with the Py3 tab "
-            "selected."
+            "The Resolve bridge worker is not running. On Free 21.1+, choose Workspace > Scripts > "
+            "Resolve AI Bridge > Start AI Bridge (Lua), with transport mode auto or lua. "
+            "On Python-enabled builds choose Start AI Bridge, or paste the line in "
+            "~/.resolve-ai-bridge/console-command.txt into Workspace > Console (Py3)."
         )
     return data
 

@@ -134,9 +134,13 @@ Some Resolve APIs differ by version. Include the Resolve version, operating syst
 ```bash
 RESOLVE_AI_BRIDGE_MODE=console python3 tools/doctor.py
 RESOLVE_AI_BRIDGE_MODE=direct python3 tools/doctor.py
+RESOLVE_AI_BRIDGE_MODE=lua python3 tools/doctor.py
 ```
 
 Set the same variable in your MCP entry's `env` block to pin one route permanently.
+Pinned direct mode reports offline when direct attach is unavailable; it never
+dispatches to a worker. Use `auto` to allow automatic transport selection and
+pre-dispatch fallback.
 
 ## Remotion Command Is Not Found
 

@@ -15,6 +15,7 @@ from bridge.operations import QUEUE_READ_ONLY, ResolveOperations
 
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 _observed = None
+_last_cleanup = (None, 0.0)
 
 
 class _WireFailure(BaseException):
@@ -220,7 +221,7 @@ def request_stop(home=None):
 
 def call(operation, params=None, timeout=30):
     """Serialize complete operations and bind edits to this client's observations."""
-    global _observed
+    global _observed, _last_cleanup
     connection = LuaClient(timeout=timeout)
     lock = lifecycle.WorkerLock(connection.home.with_name(connection.home.name + ".lua-operation"))
     while not lock.acquire():
@@ -230,6 +231,16 @@ def call(operation, params=None, timeout=30):
     record = None
     begun = False
     try:
+        # Lua-only sessions have no Python Console loop to prune recovery data.
+        # Run under the operation lock and avoid rescanning on every native RPC.
+        now = time.monotonic()
+        if _last_cleanup[0] != connection.home or now - _last_cleanup[1] >= 600:
+            try:
+                lifecycle.prune_runtime(connection.home)
+            except OSError:
+                pass  # Cleanup is best effort; retry on the next operation.
+            else:
+                _last_cleanup = (connection.home, now)
         connection.health()
         connection.transaction = uuid.uuid4().hex
         connection.request("begin_operation", {"deadline": connection.deadline})
