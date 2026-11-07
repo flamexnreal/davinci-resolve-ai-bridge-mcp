@@ -6,6 +6,7 @@ on Free 21.1.2 without io, FFI, sockets or Python inside Resolve.
 import hashlib
 import hmac
 import json
+import logging
 from pathlib import Path
 import time
 import uuid
@@ -13,7 +14,11 @@ import uuid
 from bridge import client, lifecycle
 from bridge.operations import QUEUE_READ_ONLY, ResolveOperations
 
+MAX_REQUEST_BYTES = 1024 * 1024  # ResolveLua.lua's native inbox reader limit.
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
+_LOG = logging.getLogger(__name__)
+_FINISH_WARNING = ("Could not confirm Lua worker cleanup. It may report busy until the operation "
+                   "deadline. Check Bridge Status (Lua) and inspect the timeline before retrying.")
 _observed = None
 _last_cleanup = (None, 0.0)
 
@@ -59,11 +64,16 @@ class LuaClient:
         if self.transaction is not None:
             request["transaction"] = self.transaction
         request["signature"] = hmac.new(self.token.encode(), _canonical(request).encode(), hashlib.sha256).hexdigest()
-        wire = (_canonical(request) + "\n").encode()
-        if len(wire) > 1048576:
+        # Measure the on-disk encoding used by atomic_json, including spaces,
+        # rather than the more compact encoding used for the signature.
+        if len(json.dumps(request, ensure_ascii=True)) > MAX_REQUEST_BYTES:
             raise _WireFailure("Lua RPC exceeds the request size limit; dispatch stopped.")
         try:
-            lifecycle.atomic_json(self.home / "lua-inbox.json", request)
+            lifecycle.atomic_json(self.home / "lua-inbox.json", request, deadline=self.deadline)
+        except OSError as exc:
+            raise _WireFailure("Lua could not publish this request (%s). Earlier steps may have "
+                               "completed; inspect Resolve before retrying." % exc) from exc
+        try:
             raw = b""
             while time.time() < self.deadline:
                 try:
@@ -71,6 +81,8 @@ class LuaClient:
                         candidate = output.readline(MAX_MESSAGE_BYTES + 1)
                     if len(candidate) > MAX_MESSAGE_BYTES:
                         raise _WireFailure("Lua reply exceeds the size limit; inspect before retrying.")
+                    if not candidate.endswith(b"\n"):
+                        raise ValueError("Incomplete Lua reply line")
                     envelope = json.loads(candidate)
                     payload = envelope["payload"]
                     expected = hmac.new(self.token.encode(), payload.encode(), hashlib.sha256).hexdigest()
@@ -230,6 +242,7 @@ def call(operation, params=None, timeout=30):
         time.sleep(0.05)
     record = None
     begun = False
+    result = None
     try:
         # Lua-only sessions have no Python Console loop to prune recovery data.
         # Run under the operation lock and avoid rescanning on every native RPC.
@@ -260,7 +273,6 @@ def call(operation, params=None, timeout=30):
         _observed = {"session": connection.session, "context": context}
         data.update(state="completed", result=result, context=context)
         lifecycle.atomic_json(record, data)
-        return result
     except _WireFailure as exc:
         _observed = None
         if record is not None:
@@ -281,5 +293,8 @@ def call(operation, params=None, timeout=30):
                 connection.deadline = time.time() + 2
                 connection.request("finish_operation")
             except (Exception, _WireFailure):
-                pass
+                _LOG.warning(_FINISH_WARNING)
+                if isinstance(result, dict):
+                    result = dict(result, transport_warning=_FINISH_WARNING)
         lock.release()
+    return result

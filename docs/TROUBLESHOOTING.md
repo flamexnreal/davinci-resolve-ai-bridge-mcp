@@ -50,6 +50,14 @@ The launchers are installed here:
 - Windows: `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\Resolve AI Bridge`
 - Linux: `~/.local/share/DaVinciResolve/Fusion/Scripts/Utility/Resolve AI Bridge`
 
+## Lua Worker Stays Busy on Windows
+
+A short file lock can delay a Lua request. The updated bridge retries rejected
+file replacements before delivery. It does not resend an edit after delivery.
+If a tool reports that worker cleanup could not be confirmed, check **Bridge
+Status (Lua)**, let the active operation's deadline pass, then inspect the
+timeline before retrying. Restart Resolve if the worker remains unresponsive.
+
 ## Installed Console Worker Is Missing
 
 Run the installer again from the complete downloaded repository. The required installed files are:
@@ -91,7 +99,7 @@ The MCP process treats the worker as offline when `agent.json` is missing or old
 The bridge uses a private local token file stored at `~/.resolve-ai-bridge/token.txt` (chmod `0600`).
 Both the MCP server and Resolve Console worker read the same file automatically, so no token needs to be typed or configured in your AI client.
 
-If you previously hardcoded an old `RESOLVE_AI_BRIDGE_TOKEN` in your AI client's MCP configuration (`env` block), simply remove the `env` block from your MCP settings. The server will automatically use the live local token file.
+If you previously hardcoded an old `RESOLVE_AI_BRIDGE_TOKEN` in your AI client's MCP configuration, remove just that entry from `env`. Keep `RESOLVE_AI_BRIDGE_HOME` if you use a custom runtime folder. The server will read the local token file automatically.
 
 Rotate a leaked token with:
 

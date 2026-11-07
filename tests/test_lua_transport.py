@@ -1,7 +1,9 @@
+import errno
 import functools
 import hashlib
 import hmac
 import importlib.util
+import io
 import json
 import operator
 import os
@@ -26,6 +28,12 @@ TOKEN = "rab_" + "test-only-token-" * 4
 def envelope(value):
     payload = lua_transport._canonical(value)
     return {"payload": payload, "signature": hmac.new(TOKEN.encode(), payload.encode(), hashlib.sha256).hexdigest()}
+
+
+def sharing_violation():
+    error = PermissionError(errno.EACCES, "simulated Windows sharing violation")
+    error.winerror = 5
+    return error
 
 
 @unittest.skipIf(LuaRuntime is None, "optional lupa Lua 5.1 test runtime unavailable")
@@ -116,6 +124,99 @@ class LuaProtocolTests(unittest.TestCase):
         result = self.process(self.request("get_attribute", {"target": "resolve", "name": "Increment"}))
         self.assertEqual(result["error"]["code"], "lease_mismatch")
 
+    def test_blocked_inbox_writes_do_not_replay_edits_or_strand_the_lease(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "token.txt").write_text(TOKEN)
+            replace = os.replace
+            blocked = {}
+            received = []
+
+            def publish(source, destination):
+                if Path(destination).name != "lua-inbox.json":
+                    return replace(source, destination)
+                raw = Path(source).read_bytes()
+                request = json.loads(raw)
+                operation = request["operation"]
+                if operation in ("call", "finish_operation") and operation not in blocked:
+                    blocked[operation] = raw
+                    raise sharing_violation()
+                if operation in blocked and operation not in received:
+                    self.assertEqual(raw, blocked[operation])
+                replace(source, destination)
+                received.append(operation)
+                (home / "lua-outbox.json").write_text(json.dumps(envelope(self.process(request))) + "\n")
+
+            class ProbeOperations:
+                def __init__(self, get_resolve, **kwargs):
+                    self.resolve = get_resolve()
+
+                def queue_context(self):
+                    return {"project_id": "p", "timeline_id": "t"}
+
+                def dispatch(self, operation, params):
+                    return {"count": self.resolve.Increment(1)}
+
+            with patch.object(client, "HOME", home), patch.object(lua_transport, "_observed", None), \
+                    patch.object(lua_transport, "_last_cleanup", (None, 0.0)), \
+                    patch.object(lua_transport, "ResolveOperations", ProbeOperations), \
+                    patch.object(lifecycle, "_WINDOWS", True), patch.object(os, "replace", side_effect=publish):
+                self.assertEqual(lua_transport.call("status"), {"count": 1})
+                self.assertIsNone(self.ops.transaction)
+                self.assertEqual(lua_transport.call("status"), {"count": 2})
+            self.assertEqual(received.count("call"), 2)
+            self.assertEqual(received.count("finish_operation"), 2)
+            self.assertEqual(set(blocked), {"call", "finish_operation"})
+
+    def test_worker_survives_a_temporarily_unavailable_native_write_slot(self):
+        files = {name: (ROOT / "agent/lua" / name).read_text(encoding="utf-8")
+                 for name in ("json_raw.lua", "sha256.lua", "rpc.lua")}
+        files.update({"token.txt": TOKEN, "lua-agent.json": "", "lua-inbox.json": "{}"})
+        self.lua.globals().files = self.lua.table_from(files)
+        self.lua.globals().BRIDGE_HOME = "fixture"
+        self.lua.execute('''
+            opens, writes, messages = 0, {}, {}
+            fusion = {data = {}}
+            function fusion:GetData(key) return self.data[key] end
+            function fusion:SetData(key, value) self.data[key] = value end
+            function fusion:OpenFile(path, mode)
+              local key = path:match("[^/]+$")
+              if files[key] == nil then return nil end
+              if mode == 2 then
+                opens = opens + 1
+                if opens <= 2 then return nil end
+              end
+              local offset = 1
+              return {
+                Close = function() end, Flush = function() return true end,
+                GetFileSize = function() return #files[key] end,
+                ReadLine = function()
+                  if offset > #files[key] then return nil end
+                  local eol = files[key]:find("\\n", offset, true) or #files[key] + 1
+                  local line = files[key]:sub(offset, eol - 1)
+                  offset = eol + 1
+                  return line
+                end,
+                WriteLine = function(_, value)
+                  writes[#writes + 1] = value
+                  files[key] = value
+                  return true
+                end
+              }
+            end
+            bmd = {getpid = function() return 123 end, wait = function(seconds)
+              if seconds == 0.005 then fusion:SetData("ResolveAIBridge.NativeSession", nil) end
+            end}
+            resolve = {GetVersionString = function() return "21.1.2.10" end,
+                       GetProductName = function() return "DaVinci Resolve" end}
+            print = function(message) messages[#messages + 1] = message end
+        ''')
+        self.lua.execute((ROOT / "agent/ResolveLua.lua").read_text(encoding="utf-8"))
+        self.assertEqual(list(self.lua.globals().messages.values()), ["RESOLVE AI BRIDGE LUA READY"])
+        self.assertEqual(self.lua.globals().opens, 3)
+        heartbeat = json.loads(json.loads(self.lua.globals().writes[1])["payload"])
+        self.assertTrue(heartbeat["active"])
+
     def test_private_attributes_and_truncation_are_explicit(self):
         self.begin()
         result = self.process(self.request("get_attribute", {"target": "resolve", "name": "__secret"}))
@@ -195,6 +296,107 @@ class FileTransportTests(unittest.TestCase):
         connection = lua_transport.LuaClient(self.home, timeout=2)
         self.assertEqual(connection.request("health"), {"ready": True})
         self.assertEqual(len(requests), 1)
+
+    def test_valid_reply_without_final_newline_is_reread(self):
+        connection = lua_transport.LuaClient(self.home, timeout=2)
+        original_open = Path.open
+        reads = []
+
+        def open_file(path, mode="r", *args, **kwargs):
+            if path != self.home / "lua-outbox.json" or mode != "rb":
+                return original_open(path, mode, *args, **kwargs)
+            request = json.loads((self.home / "lua-inbox.json").read_text())
+            reads.append(request["id"])
+            reply = json.dumps(envelope({"id": request["id"], "ok": True, "result": {"ready": True}}))
+            return io.BytesIO((reply + ("\n" if len(reads) > 1 else "")).encode())
+
+        with patch.object(Path, "open", open_file):
+            self.assertEqual(connection.request("health"), {"ready": True})
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(len(set(reads)), 1)
+
+    def test_expired_publication_keeps_the_previous_inbox(self):
+        inbox = self.home / "lua-inbox.json"
+        lifecycle.atomic_json(inbox, {"id": "previous"})
+        with patch.object(lifecycle, "_WINDOWS", True), \
+                patch.object(os, "replace", side_effect=sharing_violation()) as replace, \
+                patch.object(time, "time", side_effect=[100, 100, 101]), patch.object(time, "sleep"):
+            with self.assertRaises(TimeoutError):
+                lifecycle.atomic_json(inbox, {"id": "expired"}, deadline=100.1)
+        replace.assert_called_once()
+        self.assertEqual(json.loads(inbox.read_text()), {"id": "previous"})
+        self.assertFalse(list(self.home.glob("*.tmp")))
+
+    def test_request_size_limit_matches_the_published_encoding(self):
+        connection = lua_transport.LuaClient(self.home, timeout=2)
+        # Separators make the serialized inbox larger than the signed bytes.
+        arguments = {"items": [0] * 200}
+        with patch.object(lua_transport, "MAX_REQUEST_BYTES", 800):
+            with self.assertRaisesRegex(lua_transport._WireFailure, "request size limit"):
+                connection.request("call", arguments)
+        self.assertFalse((self.home / "lua-inbox.json").exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows file sharing semantics")
+    def test_actual_windows_read_handle_temporarily_blocks_replacement(self):
+        import ctypes
+        from ctypes import wintypes
+
+        inbox = self.home / "lua-inbox.json"
+        lifecycle.atomic_json(inbox, {"id": "previous"})
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                      wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+        kernel.CreateFileW.restype = wintypes.HANDLE
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        # Open for reading without FILE_SHARE_DELETE, as a polling reader can.
+        handle = kernel.CreateFileW(str(inbox), 0x80000000, 0x3, None, 3, 0x80, None)
+        if handle == ctypes.c_void_p(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        replace = os.replace
+        failures = []
+
+        def release():
+            nonlocal handle
+            if handle is not None:
+                kernel.CloseHandle(handle)
+                handle = None
+
+        def publish(source, target):
+            try:
+                return replace(source, target)
+            except PermissionError as exc:
+                failures.append(exc.winerror)
+                release()
+                raise
+
+        self.addCleanup(release)
+        with patch.object(os, "replace", side_effect=publish):
+            lifecycle.atomic_json(inbox, {"id": "new"})
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(json.loads(inbox.read_text()), {"id": "new"})
+
+    def test_failed_finish_keeps_the_successful_result_and_warns(self):
+        ops = Mock()
+        ops.queue_context.return_value = {"project_id": "p", "timeline_id": "t"}
+        ops.dispatch.return_value = {"online": True}
+
+        def request(operation, arguments=None):
+            if operation == "finish_operation":
+                raise lua_transport._WireFailure("simulated cleanup failure")
+
+        with patch.object(client, "HOME", self.home), patch.object(lua_transport, "_observed", None), \
+                patch.object(lua_transport, "_last_cleanup", (None, 0.0)), \
+                patch.object(lua_transport.LuaClient, "health"), \
+                patch.object(lua_transport.LuaClient, "request", side_effect=request), \
+                patch.object(lua_transport, "ResolveOperations", return_value=ops), \
+                self.assertLogs("bridge.lua_transport", level="WARNING") as logs:
+            result = lua_transport.call("status")
+        self.assertTrue(result["online"])
+        self.assertIn("busy", result["transport_warning"])
+        self.assertIn("busy", logs.output[0])
+        record = json.loads(next((self.home / "requests").glob("*.json")).read_text())
+        self.assertEqual(record["state"], "completed")
 
     def test_auto_lua_dispatch_failure_never_replays_to_python(self):
         with patch.object(lua_transport, "probe", return_value={"connected": True}), \

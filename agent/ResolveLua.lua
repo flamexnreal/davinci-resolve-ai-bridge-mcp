@@ -27,9 +27,21 @@ end
 local function write_file(path, value)
   -- Python pre-creates these slots with 0600 inside a 0700 home. Refuse to
   -- create a new file with native default permissions if setup is incomplete.
-  local existing = assert(app:OpenFile(path, 1), "Reinstall the bridge: missing private IPC slot")
-  existing:Close()
-  local f = assert(app:OpenFile(path, 2), "Cannot open the private IPC slot for writing")
+  local f, slot_seen
+  for attempt = 1, 12 do
+    local existing = app:OpenFile(path, 1)
+    if existing then
+      existing:Close()
+      slot_seen = true
+      f = app:OpenFile(path, 2)
+      if f then break end
+    end
+    -- The other process may have this slot open. Retry opening only;
+    -- a failed WriteLine or Flush has an uncertain outcome.
+    if attempt < 12 then bmd.wait(0.01) end
+  end
+  assert(f, slot_seen and "Cannot open the private IPC slot for writing" or
+    "Private IPC slot is missing or busy; check the bridge installation")
   local ok, err = pcall(function()
     assert(f:WriteLine(value), "Native write failed")
     assert(f:Flush(), "Native flush failed")

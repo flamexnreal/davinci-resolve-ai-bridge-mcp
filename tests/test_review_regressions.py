@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from bridge import client
 from bridge.operations import OperationError, ResolveOperations
 from fakes import Clip, Media, Project, Resolve, Timeline
+from installer_fakes import isolated_user_profile
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("review_installer", ROOT / "install.py")
@@ -142,7 +143,7 @@ class InstallerRegressionTests(unittest.TestCase):
             python.parent.mkdir(parents=True)
             python.write_text('#!/bin/sh\nprintf "%s\\n" "$RESOLVE_AI_BRIDGE_HOME"\n')
             python.chmod(0o700)
-            with patch.object(installer, "HOME", home), patch.object(Path, "home", return_value=Path(directory)):
+            with patch.object(installer, "HOME", home), isolated_user_profile(Path(directory)):
                 launchers = installer.install_global_launcher()
             result = subprocess.run([launchers[0]], capture_output=True, text=True, check=True)
             self.assertEqual(result.stdout.splitlines(), [str(home)])
@@ -166,7 +167,7 @@ class InstallerRegressionTests(unittest.TestCase):
     def test_custom_home_forwarded_to_client_registration(self):
         with tempfile.TemporaryDirectory() as directory:
             entry = {"command": "private-python", "args": ["server.py"], "env": {"RESOLVE_AI_BRIDGE_HOME": "custom-runtime"}}
-            with patch.object(Path, "home", return_value=Path(directory)), \
+            with isolated_user_profile(Path(directory)), \
                     patch("shutil.which", side_effect=lambda name: name if name == "codex" else None), \
                     patch.object(installer.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
                 installer.auto_configure_clients(entry)

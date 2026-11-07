@@ -84,7 +84,7 @@ This optional download stays in the bridge's private Python environment. It is n
 2. Choose **Workspace → Scripts → Resolve AI Bridge → Start AI Bridge (Lua)** on Free 21.1+. On Python-enabled builds, use **Start AI Bridge**. The folder may appear under **Utility**.
 3. Ask your AI: **“Call resolve_status, then bridge_capabilities and timeline_overview.”** Open or create a timeline before using timeline tools; status works without one.
 
-**Start from the menu and get editing.** Start once per Resolve session. You can see **RESOLVE AI BRIDGE READY** in **Workspace → Console**. Use **Stop AI Bridge (Lua)** for the Lua worker or **Stop AI Bridge** for Python; an active operation finishes first. Clicking Start again won't create another worker.
+**Start from the menu and get editing.** Start once per Resolve session. In **Workspace → Console**, look for **RESOLVE AI BRIDGE LUA READY** (Lua) or **RESOLVE AI BRIDGE READY** (Python). Use **Stop AI Bridge (Lua)** for the Lua worker or **Stop AI Bridge** for Python; an active operation finishes first. Clicking Start again won't create another worker.
 
 If the menu is missing after installation, quit and reopen Resolve once. Refresh/restart your AI client's MCP server after setup or a tool-schema update.
 
@@ -279,7 +279,7 @@ No token is needed in the client configuration. The server and Console worker sh
 
 ## Troubleshooting & updates
 
-If the bridge is offline, open a project and choose **Start AI Bridge**. Run the doctor from the repository for a connection check:
+If the bridge is offline, open a project and choose **Start AI Bridge (Lua)** on Free 21.1+, or **Start AI Bridge** on Python-enabled builds. Run the doctor from the repository for a connection check:
 
 ```bash
 python3 tools/doctor.py

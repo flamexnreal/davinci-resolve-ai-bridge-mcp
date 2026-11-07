@@ -1,5 +1,21 @@
 # Release Notes
 
+## Unreleased
+
+### Fixed
+
+- Windows file contention no longer immediately fails a Lua inbox write. The
+  bridge briefly retries rejected file replacements before delivery and warns if
+  it cannot confirm Lua worker cleanup. Uncertain edits are never replayed.
+- Lua waits briefly for a busy native reply or heartbeat file to open. The MCP
+  client waits for the full reply line and checks the actual size of an inbox
+  request before sending it.
+- Installer tests use temporary Windows profile paths instead of changing the
+  real Claude Desktop or other client settings.
+
+These changes have automated coverage; live Windows Resolve Free verification
+is still pending.
+
 ## v1.14.1 — Lua recovery cleanup and transport fixes (2026-11-01)
 
 This maintenance release fixes request-record retention and respects explicit
