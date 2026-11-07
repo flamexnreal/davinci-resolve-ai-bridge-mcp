@@ -13,6 +13,7 @@ import builtins
 import hashlib
 import hmac
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -25,7 +26,8 @@ from pathlib import Path
 
 
 RUNTIME_KEY = "__resolve_ai_bridge_runtime__"
-HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+HOME = Path(globals().get("RESOLVE_AI_BRIDGE_RUNTIME_HOME") or
+            os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
 INBOX = HOME / "inbox"
 OUTBOX = HOME / "outbox"
 LOGS = HOME / "logs"
@@ -137,7 +139,7 @@ class ResolveRuntime:
         self.token = _load_token()
         self.token_id = hashlib.sha256(self.token.encode("utf-8")).hexdigest()[:12]
         self.operations = operations.ResolveOperations(
-            lambda: self.resolve, token_id=self.token_id, transport="console"
+            lambda: self.resolve, token_id=self.token_id, transport="console", runtime_home=HOME
         )
         self.stop_event = threading.Event()
         self.thread = None
@@ -289,7 +291,8 @@ class ResolveRuntime:
                 path.unlink(missing_ok=True)
                 return
             response["fingerprint"] = fingerprint
-            if float(request.get("deadline", 0)) <= time.time():
+            deadline = float(request.get("deadline", 0))
+            if not math.isfinite(deadline) or deadline <= time.time():
                 raise RuntimeError("Request expired before execution; no operation started.")
             if request.get("session") != self.session:
                 raise RuntimeError("Worker session changed; inspect context and submit a new request.")
@@ -297,7 +300,7 @@ class ResolveRuntime:
             if request.get("op") not in operations.QUEUE_READ_ONLY:
                 if not request.get("context") or request["context"] != self.operations.queue_context():
                     raise RuntimeError("Project/timeline context changed or unavailable; no edit started.")
-            if float(request.get("deadline", 0)) <= time.time():
+            if deadline <= time.time():
                 raise RuntimeError("Request expired during validation; no operation started.")
             response.update(fingerprint=fingerprint, state="running")
             _atomic_json(record, response)
@@ -319,7 +322,16 @@ class ResolveRuntime:
         response["state"] = "completed" if response["ok"] else "failed"
         # Preserve a running journal on uncertain failures writing the final result.
         if response.get("fingerprint"):
-            _atomic_json(HOME / "requests" / (request_id + ".json"), response)
+            try:
+                _atomic_json(HOME / "requests" / (request_id + ".json"), response)
+            except OSError as exc:
+                self.log("Could not finalize request record %s: %s" % (request_id, exc))
+                response["recovery_record_pending"] = True
+                if response["ok"] and isinstance(response.get("result"), dict):
+                    response["result"] = dict(response["result"], transport_warning=(
+                        "Resolve returned this result, but the bridge could not finalize its recovery record. "
+                        "Inspect Resolve before attempting the edit again."
+                    ))
         self.state = {"state": response["state"], "busy": False, "request_id": request_id}
         response["took_ms"] = int((time.time() - started) * 1000)
         _atomic_json(OUTBOX / (request_id + ".json"), response)

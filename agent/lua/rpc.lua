@@ -341,10 +341,19 @@ function Ops:op_health()
  return json.object({connected=true,session=self.session,version=self.resolve:GetVersionString(),
                      busy=self.transaction~=nil})
 end
+
+function Ops:expire_operation(now)
+  if self.transaction and self.transaction_deadline <= now then
+    self:op_release_handles({})
+    self.transaction, self.transaction_deadline = nil, nil
+  end
+end
+
 function Ops:dispatch(op,args)
+ self:expire_operation(os.time())
  if op=="health" then return self:op_health() end
  if op=="begin_operation" then
-  if self.transaction and self.transaction_deadline>os.time() then
+  if self.transaction then
    error(op_error("busy","Another operation owns this Lua worker"),0)
   end
   if type(self.incoming_transaction)~="string" or #self.incoming_transaction<16 or
@@ -354,6 +363,9 @@ function Ops:dispatch(op,args)
   self.transaction=self.incoming_transaction
   self.transaction_deadline=args.deadline
   return json.object({begun=true})
+ end
+ if op=="finish_operation" and not self.transaction then
+  return json.object({finished=false}) -- Already released, or begin never reached us.
  end
  if not self.transaction or self.incoming_transaction~=self.transaction then
   error(op_error("lease_mismatch","Inspect and begin a new operation before dispatch"),0)
@@ -376,18 +388,22 @@ end
 
 local Nonces = {}
 Nonces.__index = Nonces
-function M.new_nonces(skew) return setmetatable({ retention = skew * 2, seen = {}, count = 0 }, Nonces) end
+function M.new_nonces(skew)
+  return setmetatable({ retention = skew * 2, seen = {}, count = 0, limit = 50000 }, Nonces)
+end
 function Nonces:check_and_add(nonce, now)
   local cutoff = now - self.retention
-  if self.count > 5000 then
+  if (self.count >= self.limit or self.count > 5000) and self.last_prune ~= now then
+    self.last_prune = now
     for k, t in pairs(self.seen) do if t < cutoff then self.seen[k] = nil; self.count = self.count - 1 end end
   end
-  -- hard cap: only a holder of the token can fill this store with signed requests, so a flood past
-  -- the cap is dropped wholesale rather than growing without bound inside Resolve
-  if self.count > 50000 then self.seen = {}; self.count = 0 end
   local t = self.seen[nonce]
-  if t and t >= cutoff then return false end
-  if not t then self.count = self.count + 1 end
+  if t and t >= cutoff then return false, "replayed_request" end
+  -- At capacity, refuse new nonces rather than forgetting still-valid ones.
+  if not t then
+    if self.count >= self.limit then return false, "nonce_capacity" end
+    self.count = self.count + 1
+  end
   self.seen[nonce] = now
   return true
 end
@@ -405,7 +421,8 @@ function M.authenticate(node, token, skew, nonces, now)
   local expected = sha.hmac_sha256(token, json.canonical(node, "signature"))
   if not sha.digest_equal(expected, sig.value) then return "unauthorized" end
   if math.abs(now - ts.value) > skew then return "stale_request" end
-  if not nonces:check_and_add(nonce.value, now) then return "replayed_request" end
+  local fresh, reason = nonces:check_and_add(nonce.value, now)
+  if not fresh then return reason end
   return nil
 end
 
@@ -443,6 +460,9 @@ function M.process(line, ops, config, nonces)
   -- to one inspected session and one OS-locked complete Python operation.
   if opn.value ~= "health" and not expected then
     return error_reply(id, "session_required")
+  end
+  if opn.value ~= "health" and not deadline then
+    return error_reply(id, "deadline_required")
   end
   local transaction = node_get(node, "transaction")
   ops.incoming_transaction = transaction and transaction.t == "string" and transaction.value or nil

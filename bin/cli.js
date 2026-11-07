@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 
@@ -9,8 +9,12 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 let command;
 let childArgs;
+const childEnv = { ...process.env };
 if (args[0] === '--serve') {
-  const home = process.env.RESOLVE_AI_BRIDGE_HOME || join(homedir(), '.resolve-ai-bridge');
+  const configured = process.env.RESOLVE_AI_BRIDGE_HOME;
+  const home = resolve(configured === '~' || /^~[\\/]/.test(configured || '')
+    ? join(homedir(), configured.slice(2))
+    : configured || join(homedir(), '.resolve-ai-bridge'));
   command = join(home, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
   const server = join(home, 'bridge', 'server.py');
   if (!existsSync(command) || !existsSync(server)) {
@@ -18,6 +22,7 @@ if (args[0] === '--serve') {
     process.exit(1);
   }
   childArgs = [server, ...args.slice(1)];
+  childEnv.RESOLVE_AI_BRIDGE_HOME = home;
 } else {
   const candidates = process.platform === 'win32' ? [['py', '-3'], ['python'], ['python3']] : [['python3'], ['python']];
   const selected = candidates.find(([exe, ...prefix]) => {
@@ -31,8 +36,6 @@ if (args[0] === '--serve') {
   [command, ...childArgs] = selected;
   childArgs.push(join(root, 'install.py'), ...args);
 }
-const childEnv = { ...process.env };
-if (args[0] === '--serve') childEnv.RESOLVE_AI_BRIDGE_HOME = process.env.RESOLVE_AI_BRIDGE_HOME || join(homedir(), '.resolve-ai-bridge');
 const child = spawn(command, childArgs, { stdio: 'inherit', env: childEnv });
 child.on('error', (error) => { console.error(`Could not start Resolve AI Bridge: ${error.message}`); process.exit(1); });
 child.on('exit', (code, signal) => process.exit(code ?? (signal ? 1 : 0)));

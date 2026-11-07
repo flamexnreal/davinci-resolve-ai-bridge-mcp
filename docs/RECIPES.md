@@ -65,8 +65,12 @@ Inspect the project and current timeline. Call list_render_presets and tell me w
 ## Follow a Render
 
 ```text
-I approve starting the queued render. Start it, then call render_status every so often and tell me the percentage. When it finishes, report the status and the output file. If it fails, quote the error.
+I’ve started the queued render in Resolve. Call render_status every so often and tell me the percentage. When it finishes, report the status and the output file. If it fails, quote the error.
 ```
+
+To queue and start a **new** job from the bridge, approve the render and use
+`render_current_timeline(start=True)` once. For a job already in the queue,
+start it in Resolve’s Deliver page so you don’t create a duplicate.
 
 ## Better Editing Brief
 

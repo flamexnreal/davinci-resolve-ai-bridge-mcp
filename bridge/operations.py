@@ -654,13 +654,15 @@ class ResolveOperations:
 
     ``provider`` is a zero-argument callable that returns the Resolve API
     object. It is called on every operation so a transport that can lose its
-    connection (direct attach) is able to reconnect transparently.
+    connection (direct attach) is able to reconnect transparently. Workers can
+    supply ``runtime_home`` when their installed path differs from the process environment.
     """
 
-    def __init__(self, provider, token_id=None, transport="unknown"):
+    def __init__(self, provider, token_id=None, transport="unknown", *, runtime_home=None):
         self._provider = provider
         self.token_id = token_id
         self.transport = transport
+        self.runtime_home = runtime_home
 
     # ------------------------------------------------------------------ core
 
@@ -791,8 +793,8 @@ class ResolveOperations:
             "media_pool_id": media_id,
         }
 
-    def _timeline_items(self):
-        timeline = self._timeline()
+    def _timeline_items(self, timeline=None):
+        timeline = self._timeline() if timeline is None else timeline
         results = []
         for track_type in ("video", "audio", "subtitle"):
             count = int(call(timeline, "GetTrackCount", 0, track_type) or 0)
@@ -901,7 +903,7 @@ class ResolveOperations:
     def _item_id_after_rebuild(self, timeline, created_item):
         """Unique ID (positional label only on older builds) after rebuilding."""
         unique = call(created_item, "GetUniqueId", None)
-        for item, info in self._timeline_items():
+        for item, info in self._timeline_items(timeline):
             if (unique is not None and str(info.get("unique_id")) == str(unique)) or item == created_item:
                 return info.get("id")
         return unique
@@ -1102,7 +1104,7 @@ class ResolveOperations:
                 "id": call(item, "GetUniqueId", None),
                 "index": index,
                 "name": call(item, "GetName", ""),
-                "current": item == current,
+                "current": self._same_timeline(item, current),
                 "start_frame": call(item, "GetStartFrame", None),
                 "end_frame": call(item, "GetEndFrame", None),
             })
@@ -1113,16 +1115,20 @@ class ResolveOperations:
         name = params.get("name")
         index = params.get("index")
         timeline_id = params.get("timeline_id")
-        selected = None
+        if sum((bool(name), index is not None, bool(timeline_id))) != 1:
+            raise OperationError("Pass exactly one of name, index, or timeline_id.")
+        matches = []
         for item_index in range(1, int(project.GetTimelineCount() or 0) + 1):
             item = project.GetTimelineByIndex(item_index)
             if (index is not None and int(index) == item_index) or (name and item.GetName() == name) or (timeline_id and call(item, "GetUniqueId", None) == timeline_id):
-                selected = item
-                break
-        if selected is None:
+                matches.append(item)
+        if not matches:
             raise OperationError("Timeline not found. Call list_timelines for valid names and indexes.")
-        if not project.SetCurrentTimeline(selected):
-            raise OperationError("Resolve refused to open the requested timeline.")
+        if len(matches) != 1:
+            raise OperationError("Timeline name is ambiguous. Use a unique ID or index from list_timelines.")
+        selected = matches[0]
+        if not self._activate_timeline(project, selected):
+            raise OperationError("Could not verify that Resolve opened the requested timeline.")
         return {"opened": selected.GetName()}
 
     def _op_timeline_overview(self, params):
@@ -1490,10 +1496,15 @@ class ResolveOperations:
             segments.append({"mediaPoolItem": media, "startFrame": source_start + begin - start,
                              "endFrame": source_start + finish - start, "recordFrame": begin,
                              "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2})
+        if not self._is_current_timeline(self._project(), timeline):
+            raise OperationError("The active timeline changed before the split. Nothing was removed; checkpoint: %s." % checkpoint_info["name"])
         if not timeline.DeleteClips([item], False):
             raise OperationError("Resolve refused to remove the original clip. Checkpoint: %s." % checkpoint_info["name"])
         try:
-            created = self._media_pool().AppendToTimeline(segments) or []
+            pool = self._media_pool()
+            if not self._is_current_timeline(self._project(), timeline):
+                raise OperationError("The active timeline changed before the halves could be placed.")
+            created = pool.AppendToTimeline(segments) or []
             if len(created) != 2:
                 raise OperationError("Resolve created %d of 2 halves." % len(created))
             for piece, segment in zip(created, segments):
@@ -1512,7 +1523,7 @@ class ResolveOperations:
             if info["track_type"] == "video" and not grade_copied:
                 raise OperationError("Could not preserve the current color-grade layer.")
         except Exception as exc:
-            reopened = bool(self._project().SetCurrentTimeline(checkpoint))
+            reopened = self._activate_timeline(self._project(), checkpoint)
             raise OperationError("Split failed: %s. Checkpoint '%s' contains the pre-edit timeline; %s. The attempted timeline may contain partial edits and has been retained."
                                  % (exc, checkpoint_info["name"], "opened the checkpoint for recovery" if reopened else "open that checkpoint manually"))
         return {"original": info["id"], "cut_frame": frame, "checkpoint": checkpoint_info,
@@ -1774,14 +1785,23 @@ class ResolveOperations:
             candidates = tools.values() if isinstance(tools, dict) else list(tools)
             for tool in candidates:
                 for attribute in ("StyledText", "Text"):
-                    try:
-                        target = getattr(tool, attribute, None)
-                        if target is None:
+                    current = call(tool, "GetInput", None, attribute)
+                    if isinstance(current, str):
+                        if current != text:
+                            # Explicit setters work through the Lua proxy, where
+                            # assigning a Python attribute is not supported.
+                            call(tool, "SetInput", None, attribute, text)
+                        if call(tool, "GetInput", None, attribute) == text:
+                            return True
+                    else:
+                        # Some native Python wrappers only expose a string property.
+                        try:
+                            if isinstance(getattr(tool, attribute, None), str):
+                                setattr(tool, attribute, text)
+                                if getattr(tool, attribute, None) == text:
+                                    return True
+                        except Exception:
                             continue
-                        setattr(tool, attribute, text)
-                        return True
-                    except Exception:
-                        continue
         return False
 
     def _op_create_timeline(self, params):
@@ -1789,12 +1809,16 @@ class ResolveOperations:
         if not name:
             raise OperationError("name is required.")
         timeline = self._media_pool().CreateEmptyTimeline(name)
-        if timeline is None:
+        if not timeline:
             raise OperationError(
                 "Resolve could not create the timeline. The name may already be in use."
             )
-        self._project().SetCurrentTimeline(timeline)
-        return {"created": timeline.GetName()}
+        if isinstance(timeline, bool):
+            return {"created": None, "active": None, "note": "Resolve did not identify the new timeline. Inspect list_timelines before editing or retrying."}
+        result = {"created": timeline.GetName(), "active": self._activate_timeline(self._project(), timeline)}
+        if not result["active"]:
+            result["note"] = "The timeline was created, but Resolve did not confirm opening it. Inspect or open it before editing."
+        return result
 
     def _op_set_playhead(self, params):
         timecode = str(params.get("timecode", "")).strip()
@@ -2444,8 +2468,13 @@ class ResolveOperations:
         """Progress of queued render jobs, from Resolve's ordinary render API (works in Free)."""
         project = self._project()
         wanted = str(params.get("job_id") or "").strip()
-        jobs = call(project, "GetRenderJobList", []) or []
-        listed = {str(job.get("JobId")): job for job in jobs if isinstance(job, dict) and job.get("JobId")}
+        jobs = call(project, "GetRenderJobList", None)
+        if isinstance(jobs, dict):
+            # Lua may serialize an empty or keyed table as a mapping.
+            jobs = list(jobs.values())
+        if not isinstance(jobs, (list, tuple)) or any(not isinstance(job, dict) or not job.get("JobId") for job in jobs):
+            raise OperationError("Resolve did not return a usable render queue. Check the Deliver page for queued jobs.")
+        listed = {str(job["JobId"]): job for job in jobs}
         if wanted and wanted not in listed:
             raise OperationError("Render job '%s' is not in the queue. Call render_status without job_id to list jobs." % wanted)
         report = []
@@ -2467,7 +2496,8 @@ class ResolveOperations:
             if not status:
                 entry["note"] = "Resolve returned no status for this job."
             report.append(entry)
-        return {"rendering": bool(call(project, "IsRenderingInProgress", False)), "jobs": report,
+        rendering = call(project, "IsRenderingInProgress", None)
+        return {"rendering": rendering if isinstance(rendering, bool) else None, "jobs": report,
                 "note": None if report else "The render queue is empty."}
 
     def _source_window(self, item, timeline_frame):
@@ -2495,13 +2525,13 @@ class ResolveOperations:
         return float(source_start) / source_fps + (position - start) / fps, max(0, (end - position) / fps)
 
     @staticmethod
-    def _ffmpeg_path():
+    def _ffmpeg_path(runtime_home=None):
         """Find a user-installed decoder or the installer's optional private binary."""
         import shutil
         binary = os.environ.get("RESOLVE_AI_BRIDGE_FFMPEG") or shutil.which("ffmpeg")
         if binary:
             return binary
-        home = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+        home = Path(runtime_home or os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
         try:
             path = Path((home / "ffmpeg-path.txt").read_text(encoding="utf-8").strip())
             if not path.is_absolute():
@@ -2596,7 +2626,7 @@ class ResolveOperations:
             if not file_path or not Path(file_path).is_file():
                 raise OperationError("The visible clip has no readable source file. Source fallback cannot capture generators or offline media.")
             source_seconds, _ = self._source_window(item, current_frame) if Path(file_path).suffix.lower() not in IMAGE_SUFFIXES else (0.0, 0.0)
-            ffmpeg = self._ffmpeg_path()
+            ffmpeg = self._ffmpeg_path(self.runtime_home)
             if not ffmpeg:
                 raise OperationError("Source capture needs ffmpeg on PATH (Free-compatible). Composite capture was unavailable.")
             try:
@@ -2611,7 +2641,7 @@ class ResolveOperations:
         resized = False
         if width and max_width > 0 and width > max_width:
             target = path.with_name(path.stem + "_small" + path.suffix)
-            ffmpeg = self._ffmpeg_path()
+            ffmpeg = self._ffmpeg_path(self.runtime_home)
             sips = shutil.which("sips")
             command = ([ffmpeg, "-v", "error", "-y", "-i", str(path), "-vf", "scale=%d:-1" % max_width, str(target)] if ffmpeg else
                        [sips, "--resampleWidth", str(max_width), str(path), "--out", str(target)] if sips else None)
@@ -2684,7 +2714,7 @@ class ResolveOperations:
         audio_dir.mkdir(parents=True, exist_ok=True)
         slice_path = audio_dir / ("slice_%s.wav" % uuid.uuid4().hex)
         full_path = audio_dir / ("decode_%s.wav" % uuid.uuid4().hex)
-        ffmpeg, afconvert = self._ffmpeg_path(), shutil.which("afconvert")
+        ffmpeg, afconvert = self._ffmpeg_path(self.runtime_home), shutil.which("afconvert")
         try:
             if ffmpeg:
                 command = [ffmpeg, "-v", "error", "-y", "-ss", "%.9f" % source_seconds, "-i", str(file_path), "-t", "%.9f" % duration,
@@ -2924,20 +2954,20 @@ class ResolveOperations:
             raise OperationError("Resolve could not create compound clip from the specified items.")
 
         new_id = self._item_id_after_rebuild(timeline, created_item) if not isinstance(created_item, bool) else None
-        if not new_id and targets:
-            new_id = targets[0][1].get("id")
-
-        return {
+        result = {
             "created_compound_clip": {
                 "id": new_id,
                 "name": str(call(created_item, "GetName", clip_info.get("name", "Compound Clip"))) if not isinstance(created_item, bool) else clip_info.get("name", "Compound Clip"),
-                "duration": int(call(created_item, "GetDuration", 0) or 0) if not isinstance(created_item, bool) else 0,
-                "start_frame": int(call(created_item, "GetStart", 0) or 0) if not isinstance(created_item, bool) else 0,
-                "end_frame": int(call(created_item, "GetEnd", 0) or 0) if not isinstance(created_item, bool) else 0,
-                "unique_id": str(call(created_item, "GetUniqueId", "")) if not isinstance(created_item, bool) else "",
+                "duration": call(created_item, "GetDuration", None),
+                "start_frame": call(created_item, "GetStart", None),
+                "end_frame": call(created_item, "GetEnd", None),
+                "unique_id": call(created_item, "GetUniqueId", None),
             },
             "source_items": [info["id"] for _, info in targets],
         }
+        if not new_id:
+            result["note"] = "Resolve reported creation but did not identify the new item. Inspect timeline_overview before targeting it."
+        return result
 
     def _timeline_snapshot(self, timeline, include_track_state=True):
         """Read comparable structure without changing the active timeline."""
@@ -2970,29 +3000,44 @@ class ResolveOperations:
     def _timeline_identity(timeline):
         return {"id": call(timeline, "GetUniqueId", None), "name": call(timeline, "GetName", "")}
 
+    @staticmethod
+    def _same_timeline(first, second):
+        if first is None or second is None:
+            return False
+        first_id = call(first, "GetUniqueId", None)
+        second_id = call(second, "GetUniqueId", None)
+        return str(first_id) == str(second_id) if first_id and second_id else first == second
+
+    def _is_current_timeline(self, project, timeline):
+        return self._same_timeline(call(project, "GetCurrentTimeline", None), timeline)
+
+    def _activate_timeline(self, project, timeline):
+        call(project, "SetCurrentTimeline", False, timeline)
+        return self._is_current_timeline(project, timeline)
+
     def _duplicate_current(self, name, open_duplicate=True):
         project, original = self._project(), self._timeline()
         before = self._timeline_snapshot(original)
         unique_name = "%s — %s" % (str(name or (original.GetName() + " preview"))[:120], uuid.uuid4().hex[:8])
         duplicate = call(original, "DuplicateTimeline", None, unique_name)
-        if duplicate is None or isinstance(duplicate, bool):
-            raise OperationError("Timeline duplication is unavailable on this Resolve build; no edit was attempted.")
+        if duplicate is None or isinstance(duplicate, bool) or self._same_timeline(original, duplicate):
+            raise OperationError("Resolve did not return a separate timeline copy; no clip edits were attempted.")
         try:
             # DuplicateTimeline may activate its copy. Resolve can report false
             # track-enabled flags on inactive timelines, so verify each while open.
-            if not project.SetCurrentTimeline(original):
+            if not self._activate_timeline(project, original):
                 raise OperationError("Could not reopen the original to verify its checkpoint.")
             if self._timeline_snapshot(original) != before:
                 raise OperationError("Timeline changed while it was being copied; inspect both timelines before editing.")
-            if not project.SetCurrentTimeline(duplicate):
+            if not self._activate_timeline(project, duplicate):
                 raise OperationError("Could not open the duplicate to verify its structure.")
             if self._timeline_snapshot(duplicate) != before:
                 raise OperationError("The duplicate did not match the original timeline structure; no edit was attempted.")
             target = duplicate if open_duplicate else original
-            if not project.SetCurrentTimeline(target):
+            if not self._activate_timeline(project, target):
                 raise OperationError("Could not open the requested timeline after duplication.")
         except Exception:
-            project.SetCurrentTimeline(original)
+            call(project, "SetCurrentTimeline", False, original)
             raise
         return duplicate, self._timeline_identity(duplicate)
 
@@ -3102,12 +3147,13 @@ class ResolveOperations:
         instance = self.resolve
         project = call(call(instance, "GetProjectManager", None), "GetCurrentProject", None)
         timeline = call(project, "GetCurrentTimeline", None)
+        ffmpeg = self._ffmpeg_path(self.runtime_home)
         return {"bridge_version": AGENT_VERSION, "resolve_version": call(instance, "GetVersionString", None),
                 "product": call(instance, "GetProductName", None), "transport": self.transport,
                 "timeline_open": timeline is not None,
                 "api_present": {method: callable(getattr(timeline, method, None)) if timeline is not None else None for method in ("DuplicateTimeline", "GetMarkers", "AddMarker", "DeleteClips", "GetUniqueId")},
-                "source_frame_decoder": self._ffmpeg_path() is not None,
-                "source_audio_decoder": bool(self._ffmpeg_path() or shutil.which("afconvert")),
+                "source_frame_decoder": ffmpeg is not None,
+                "source_audio_decoder": bool(ffmpeg or shutil.which("afconvert")),
                 "free_workflow": "On Free 21.1+, use Start AI Bridge (Lua): authenticated native file APIs carry the shared operations without Python inside Resolve. The older Python worker remains available on Python-enabled builds. Review tools use ordinary APIs and source decoding.",
                 "limitations": ["API presence is not proof a call will succeed on this build; each operation checks its result.",
                                 "Composite frame export is attempted at capture time; source fallback needs ffmpeg and excludes timeline effects.",
@@ -3203,7 +3249,7 @@ class ResolveOperations:
         original_identity = self._timeline_identity(timeline)
         preview, preview_identity = self._duplicate_current(params.get("name") or "Dialogue cleanup", open_duplicate=True)
         try:
-            copied = [item for item, _ in self._timeline_items()]
+            copied = [item for item, _ in self._timeline_items(preview)]
             if not preview.DeleteClips(copied, False):
                 raise OperationError("Resolve refused to replace the copied dialogue clips.")
             batches = []
@@ -3214,7 +3260,10 @@ class ResolveOperations:
                     request = {"mediaPoolItem": media, "startFrame": source + begin - start,
                                "endFrame": source + finish - start, "recordFrame": record,
                                "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2}
-                    created = self._media_pool().AppendToTimeline([request]) or []
+                    pool = self._media_pool()
+                    if not self._is_current_timeline(self._project(), preview):
+                        raise OperationError("The active timeline changed before dialogue could be placed on the preview.")
+                    created = pool.AppendToTimeline([request]) or []
                     if len(created) != 1 or call(created[0], "GetStart", None) != record or call(created[0], "GetEnd", None) != record + finish - begin:
                         raise OperationError("Resolve returned an incorrect rebuilt dialogue segment.")
                     piece = created[0]
@@ -3244,7 +3293,7 @@ class ResolveOperations:
                 except (ValueError, TypeError):
                     pass
         except Exception as exc:
-            reopened = bool(self._project().SetCurrentTimeline(timeline))
+            reopened = self._activate_timeline(self._project(), timeline)
             raise OperationError("Dialogue cleanup failed: %s. Original '%s' is intact%s. Partial preview '%s' retained for inspection."
                                  % (exc, original_identity["name"], " and reopened" if reopened else "; open it manually", preview_identity["name"]))
         return {"original": original_identity, "preview": preview_identity, "removed_frames": sum(b-a for a, b in ranges),

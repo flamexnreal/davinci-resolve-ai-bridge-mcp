@@ -29,6 +29,23 @@ local function utf8_encode(cp)
               0x80 + floor(cp / 0x40) % 0x40, 0x80 + cp % 0x40)
 end
 
+local function utf8_next(s, i)
+  local first = byte(s, i)
+  if first < 0x80 then return first, i + 1 end
+  local n, cp, minimum
+  if first >= 0xC2 and first <= 0xDF then n, cp, minimum = 2, first - 0xC0, 0x80
+  elseif first >= 0xE0 and first <= 0xEF then n, cp, minimum = 3, first - 0xE0, 0x800
+  elseif first >= 0xF0 and first <= 0xF4 then n, cp, minimum = 4, first - 0xF0, 0x10000
+  else return nil, i + 1 end
+  for offset = 1, n - 1 do
+    local next_byte = byte(s, i + offset)
+    if not next_byte or next_byte < 0x80 or next_byte > 0xBF then return nil, i + 1 end
+    cp = cp * 0x40 + next_byte - 0x80
+  end
+  if cp < minimum or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF) then return nil, i + 1 end
+  return cp, i + n
+end
+
 local ESC = { ['"'] = '"', ['\\'] = '\\', ['/'] = '/', b = '\b', f = '\f', n = '\n', r = '\r', t = '\t' }
 
 local function parse_error(s, pos, msg)
@@ -66,6 +83,7 @@ local function parse_string(s, pos)
             end
           end
         end
+        if cp >= 0xD800 and cp <= 0xDFFF then return parse_error(s, i, "unpaired surrogate") end
         out[#out + 1] = utf8_encode(cp)
       elseif ESC[e] then
         out[#out + 1] = ESC[e]
@@ -75,8 +93,13 @@ local function parse_string(s, pos)
       end
     elseif c < 32 then
       return parse_error(s, i, "control character in string")
+    elseif c >= 128 then
+      local cp, next_byte = utf8_next(s, i)
+      if not cp then return parse_error(s, i, "invalid UTF-8") end
+      out[#out + 1] = sub(s, i, next_byte - 1)
+      i = next_byte
     else
-      local j = find(s, '["\\%c]', i) or (n + 1)
+      local j = find(s, '["\\%z\1-\31\128-\255]', i) or (n + 1)
       out[#out + 1] = sub(s, i, j - 1)
       i = j
     end
@@ -99,7 +122,7 @@ parse_value = function(s, pos, depth)
   local c = byte(s, pos)
   if c == nil then return parse_error(s, pos, "unexpected end") end
   if c == 123 then -- {
-    local pairs_ = {}
+    local pairs_, seen = {}, {}
     pos = skip_ws(s, pos + 1)
     if byte(s, pos) == 125 then return { t = "object", pairs = pairs_ }, pos + 1 end
     while true do
@@ -107,6 +130,9 @@ parse_value = function(s, pos, depth)
       if byte(s, pos) ~= 34 then return parse_error(s, pos, "expected string key") end
       local k, np = parse_string(s, pos)
       if not k then return nil, np end
+      -- The authenticator and dispatcher must agree on every member value.
+      if seen[k.value] then return parse_error(s, pos, "duplicate object key") end
+      seen[k.value] = true
       pos = skip_ws(s, np)
       if byte(s, pos) ~= 58 then return parse_error(s, pos, "expected ':'") end
       local v, np2 = parse_value(s, pos + 1, depth + 1)
@@ -189,26 +215,12 @@ M.bytewise_less = bytewise_less
 -- Python escapes everything outside 0x20..0x7E plus the quote and the backslash.
 local SHORT = { [8] = "\\b", [9] = "\\t", [10] = "\\n", [12] = "\\f", [13] = "\\r", [34] = '\\"', [92] = "\\\\" }
 
-local function utf8_next(s, i)
-  local c = byte(s, i)
-  if c < 0x80 then return c, i + 1 end
-  if c >= 0xF0 then
-    local b2, b3, b4 = byte(s, i + 1, i + 3)
-    return (c - 0xF0) * 0x40000 + (b2 - 0x80) * 0x1000 + (b3 - 0x80) * 0x40 + (b4 - 0x80), i + 4
-  elseif c >= 0xE0 then
-    local b2, b3 = byte(s, i + 1, i + 2)
-    return (c - 0xE0) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80), i + 3
-  else
-    local b2 = byte(s, i + 1)
-    return (c - 0xC0) * 0x40 + (b2 - 0x80), i + 2
-  end
-end
-
 function M.encode_string(s)
   local out, i, n = { '"' }, 1, #s
   while i <= n do
     local cp, ni = utf8_next(s, i)
-    if SHORT[cp] then out[#out + 1] = SHORT[cp]
+    if not cp then out[#out + 1] = "\\ufffd" -- Native errors can end in a partial character.
+    elseif SHORT[cp] then out[#out + 1] = SHORT[cp]
     elseif cp >= 0x20 and cp <= 0x7E then out[#out + 1] = char(cp)
     elseif cp < 0x10000 then out[#out + 1] = format("\\u%04x", cp)
     else
@@ -237,8 +249,8 @@ function M.canonical(node, skip_key)
     local keys, byname = {}, {}
     for _, p in ipairs(node.pairs) do
       if p.key ~= skip_key then
-        if byname[p.key] == nil then keys[#keys + 1] = p.key end
-        byname[p.key] = p.value -- later duplicates win, as in Python
+        keys[#keys + 1] = p.key
+        byname[p.key] = p.value
       end
     end
     table.sort(keys, bytewise_less)

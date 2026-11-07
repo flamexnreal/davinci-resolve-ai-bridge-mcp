@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 
@@ -71,16 +70,32 @@ def menu_script_folders():
 
 
 def check_menu_scripts():
-    found = [folder for folder in menu_script_folders() if (folder / "Start AI Bridge.py").is_file()]
-    if found:
-        result(True, "Workspace > Scripts launcher", str(found[0]))
-    else:
+    folders = menu_script_folders()
+    for label, name in (("Python", "Start AI Bridge.py"), ("Lua", "Start AI Bridge (Lua).lua")):
+        found = next((folder / name for folder in folders if (folder / name).is_file()), None)
         result(
-            False,
-            "Workspace > Scripts launcher",
-            "not installed; rerun install.py, then restart Resolve",
+            found is not None,
+            "Workspace > Scripts %s launcher" % label,
+            str(found) if found else "not installed; rerun install.py, then restart Resolve",
             warning=True,
         )
+
+
+def check_lua_runtime():
+    scripts = ("ResolveLua.lua", "StopLua.lua", "StatusLua.lua", "lua/rpc.lua", "lua/json_raw.lua", "lua/sha256.lua")
+    slots = ("lua-inbox.json", "lua-outbox.json", "lua-agent.json", "lua-stop.json")
+    missing = [name for name in scripts + slots if not (HOME / name).is_file()]
+    result(not missing, "Installed Lua worker",
+           "missing " + ", ".join(missing) if missing else "native Fusion file transport")
+
+
+def check_console_command(name, label, markers):
+    try:
+        line = (HOME / name).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        line = ""
+    ready = bool(line) and len(line.splitlines()) == 1 and all(marker in line for marker in markers)
+    result(ready, label, "ready" if ready else "missing or outdated; rerun install.py")
 
 
 def check_direct_attach():
@@ -132,6 +147,8 @@ def check_direct_attach():
 
 
 def main():
+    global failures, warnings
+    failures = warnings = 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--offline", action="store_true", help="Check files only; never attach or queue Resolve calls")
     args = parser.parse_args()
@@ -149,24 +166,18 @@ def main():
     )
     result((HOME / "bridge" / "lifecycle.py").exists(), "Installed worker lifecycle",
            str(HOME / "bridge" / "lifecycle.py"))
-    result((HOME / "ResolveLua.lua").is_file() and (HOME / "lua" / "rpc.lua").is_file(),
-           "Installed Lua worker", "native Fusion file transport")
+    check_lua_runtime()
     result(venv_python().exists(), "Private Python", str(venv_python()))
     check_menu_scripts()
 
-    console_command = HOME / "console-command.txt"
-    line = console_command.read_text(encoding="utf-8").strip() if console_command.exists() else ""
-    result(
-        "expanduser" in line,
-        "Portable Console line",
-        "no user name to substitute" if "expanduser" in line else "missing or outdated; rerun install.py",
-    )
+    check_console_command("console-command.txt", "Portable Python Console line", ("expanduser", "ResolveConsole.py"))
+    check_console_command("lua-console-command.txt", "Portable Lua Console line", ("RunScript", "ResolveLua.lua"))
 
     token_path = HOME / "token.txt"
     token = ""
     try:
         token = token_path.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, UnicodeError):
         pass
     result(
         token.startswith("rab_") and len(token) > 30,
@@ -195,30 +206,21 @@ def main():
 
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    from bridge import lua_transport
+    from bridge import lifecycle, lua_transport
     lua = lua_transport.probe(HOME)
     lua_online = bool(lua.get("connected"))
     result(lua_online, "Lua worker", ("Resolve " + lua.get("resolve_version", "")) if lua_online else "not running", warning=True)
     direct = {} if args.offline or lua_online else (check_direct_attach() or {})
 
-    heartbeat_path = HOME / "agent.json"
-    heartbeat = None
-    try:
-        heartbeat = json.loads(heartbeat_path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    console_online = bool(heartbeat and time.time() - float(heartbeat.get("time", 0)) < 25)
+    heartbeat = lifecycle.fresh_state(HOME)
+    console_online = bool(heartbeat)
     if console_online:
         detail = "project %s, timeline %s" % (
             heartbeat.get("project") or "none",
             heartbeat.get("timeline") or "none",
         )
-    elif heartbeat:
-        detail = "not running (last seen %.0f minutes ago)" % (
-            max(0, time.time() - float(heartbeat.get("time", 0))) / 60.0
-        )
     else:
-        detail = "not running"
+        detail = "not running or heartbeat invalid/stale"
     # This is a live state, never an installation problem, so it stays a warning.
     result(console_online, "Console worker", detail, warning=True)
 
@@ -248,7 +250,9 @@ def main():
 
     print("\nSummary: %d failure(s), %d warning(s)" % (failures, warnings))
     if failures:
-        print("Open README.md and follow the Help section in order.")
+        print("See docs/TROUBLESHOOTING.md for repair steps.")
+    elif args.offline:
+        print("Local files are healthy. A live connection was not tested.")
     elif not (direct.get("ok") or console_online or lua_online):
         print("Local files are healthy. Open DaVinci Resolve with a project, then run this again.")
     else:

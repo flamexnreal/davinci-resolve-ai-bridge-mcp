@@ -78,9 +78,9 @@ def heartbeat(max_age=25.0):
         return None
     try:
         age = time.time() - float(data.get("time", 0))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if age > max_age or age < -10:
+    if not -10 <= age <= max_age:
         return None
     data["heartbeat_age_seconds"] = round(max(0.0, age), 2)
     return data
@@ -128,6 +128,16 @@ def call(operation, params=None, timeout=30.0):
         if response_path.exists():
             try:
                 response = _read_json(response_path)
+                if (not isinstance(response, dict) or response.get("id") != request_id
+                        or not isinstance(response.get("ok"), bool)
+                        or (response["ok"] and response.get("session") != worker.get("session"))):
+                    raise ValueError("invalid response identity or shape")
+            except (OSError, ValueError) as exc:
+                _observed = None
+                raise BridgeCallError(
+                    "Resolve returned an unreadable or mismatched reply for %s. Outcome unknown; "
+                    "inspect the request record and Resolve before retrying." % request_id
+                ) from exc
             finally:
                 try:
                     response_path.unlink()
@@ -135,9 +145,12 @@ def call(operation, params=None, timeout=30.0):
                     pass
             if not response.get("ok"):
                 raise BridgeCallError(response.get("error", "Resolve returned an unknown error."))
-            _observed = {"context": response.get("context"), "session": response.get("session")}
+            _observed = None if response.get("recovery_record_pending") else {
+                "context": response.get("context"), "session": response.get("session")
+            }
             return response.get("result")
         time.sleep(0.06)
+    _observed = None
     try:
         request_path.unlink()
     except OSError:

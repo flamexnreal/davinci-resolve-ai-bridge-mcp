@@ -106,6 +106,34 @@ class LuaProtocolTests(unittest.TestCase):
         self.assertEqual(self.process(request)["error"]["code"], "replayed_request")
         self.assertEqual(self.resolve.count, 1)
 
+    def test_duplicate_fields_cannot_change_a_captured_signed_request(self):
+        self.begin()
+        request = self.request("call", {"target": "resolve", "method": "Increment", "args": [1]})
+        self.assertTrue(self.process(request)["ok"])
+        # Prepend a different nonce and edit, preserving the signed values at the end.
+        forged = ('{"nonce":"forged-nonce-0001","arguments":'
+                  '{"target":"resolve","method":"Increment","args":[100]},'
+                  + lua_transport._canonical(request)[1:])
+        result = self.rpc.process(forged, self.ops, self.config, self.nonces)
+        self.assertEqual(json.loads(self.json.encode(result))["error"]["code"], "invalid_json")
+        self.assertEqual(self.resolve.count, 1)
+
+    def test_full_nonce_cache_still_rejects_replays(self):
+        self.nonces.limit = 1
+        self.assertTrue(self.nonces.check_and_add(self.nonces, "original", 100))
+        self.assertEqual(self.nonces.check_and_add(self.nonces, "new", 100), (False, "nonce_capacity"))
+        self.assertEqual(self.nonces.check_and_add(self.nonces, "original", 100), (False, "replayed_request"))
+        self.assertTrue(self.nonces.check_and_add(self.nonces, "new", 221))
+
+    def test_json_handles_raw_del_and_rejects_invalid_utf8(self):
+        for value in (b'"\x7f"', '"é 🦊"'.encode()):
+            parsed = self.json.parse(value)
+            self.assertEqual(json.loads(self.json.canonical(parsed)), json.loads(value))
+        for value in (b'"\xf0"', b'"\xc0\x80"', b'"\\ud800"', b'{"x": 1, "\\u0078": 2}'):
+            node, error = self.json.parse(value)
+            self.assertIsNone(node, error)
+        self.assertEqual(json.loads(self.json.encode_string(b"partial \xf0")), "partial \ufffd")
+
     def test_session_lease_and_deadline_are_checked_before_mutation(self):
         args = {"target": "resolve", "method": "Increment", "args": [1]}
         self.assertEqual(self.process(self.request("call", args))["error"]["code"], "lease_mismatch")
@@ -123,6 +151,49 @@ class LuaProtocolTests(unittest.TestCase):
         self.assertIsNone(self.ops.transaction)
         result = self.process(self.request("get_attribute", {"target": "resolve", "name": "Increment"}))
         self.assertEqual(result["error"]["code"], "lease_mismatch")
+
+    def test_expired_lease_cannot_dispatch_with_a_new_request_deadline(self):
+        self.begin()
+        self.ops.transaction_deadline = time.time() - 2
+        result = self.process(self.request("call", {"target": "resolve", "method": "Increment", "args": [1]}))
+        self.assertEqual(result["error"]["code"], "lease_mismatch")
+        self.assertIsNone(self.ops.transaction)
+        self.assertEqual(self.resolve.count, 0)
+
+    def test_lost_begin_reply_releases_only_its_lease_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / "token.txt").write_text(TOKEN)
+            save = lifecycle.atomic_json
+            read = lua_transport.LuaClient._read_reply
+            requests = []
+
+            def publish(path, data, *args, **kwargs):
+                save(path, data, *args, **kwargs)
+                if path.name != "lua-inbox.json":
+                    return
+                requests.append(data)
+                reply = json.dumps(envelope(self.process(data))) + "\n"
+                (home / "lua-outbox.json").write_text(reply)
+
+            def read_reply(connection, request_id):
+                if requests[-1]["operation"] == "begin_operation":
+                    self.assertEqual(self.ops.transaction, requests[-1]["transaction"])
+                    raise lua_transport._ReplyFailure("simulated missing begin reply")
+                return read(connection, request_id)
+
+            with patch.object(client, "HOME", home), patch.object(lua_transport, "_observed", None), \
+                    patch.object(lua_transport, "_last_cleanup", (None, 0.0)), \
+                    patch.object(lifecycle, "atomic_json", side_effect=publish), \
+                    patch.object(lua_transport.LuaClient, "_read_reply", read_reply):
+                with self.assertRaisesRegex(client.BridgeCallError, "dispatch not started"):
+                    lua_transport.call("status")
+            self.assertEqual([request["operation"] for request in requests],
+                             ["health", "begin_operation", "finish_operation"])
+            self.assertEqual(requests[1]["transaction"], requests[2]["transaction"])
+            self.assertEqual(requests[1]["expected_session"], requests[2]["expected_session"])
+            self.assertIsNone(self.ops.transaction)
+            self.assertFalse((home / "requests").exists())
 
     def test_blocked_inbox_writes_do_not_replay_edits_or_strand_the_lease(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -315,6 +386,26 @@ class FileTransportTests(unittest.TestCase):
         self.assertEqual(len(reads), 2)
         self.assertEqual(len(set(reads)), 1)
 
+    def test_oversized_old_reply_does_not_abort_a_new_request(self):
+        connection = lua_transport.LuaClient(self.home, timeout=2)
+        original_open = Path.open
+        reads = []
+
+        def open_file(path, mode="r", *args, **kwargs):
+            if path != self.home / "lua-outbox.json" or mode != "rb":
+                return original_open(path, mode, *args, **kwargs)
+            request = json.loads((self.home / "lua-inbox.json").read_text())
+            reads.append(request["id"])
+            if len(reads) == 1:
+                return io.BytesIO(b"x" * 513)
+            reply = envelope({"id": request["id"], "ok": True, "result": {"ready": True}})
+            return io.BytesIO((json.dumps(reply) + "\n").encode())
+
+        with patch.object(Path, "open", open_file), patch.object(lua_transport, "MAX_MESSAGE_BYTES", 512):
+            self.assertEqual(connection.request("health"), {"ready": True})
+        self.assertEqual(len(reads), 2)
+        self.assertEqual(len(set(reads)), 1)
+
     def test_expired_publication_keeps_the_previous_inbox(self):
         inbox = self.home / "lua-inbox.json"
         lifecycle.atomic_json(inbox, {"id": "previous"})
@@ -398,6 +489,32 @@ class FileTransportTests(unittest.TestCase):
         record = json.loads(next((self.home / "requests").glob("*.json")).read_text())
         self.assertEqual(record["state"], "completed")
 
+    def test_terminal_journal_write_failure_preserves_success_and_running_record(self):
+        ops = Mock()
+        ops.queue_context.return_value = {"project_id": "p", "timeline_id": "t"}
+        ops.dispatch.return_value = {"online": True}
+        save = lifecycle.atomic_json
+
+        def fail_final_write(path, data, **kwargs):
+            if data.get("state") in ("completed", "failed"):
+                raise OSError(errno.ENOSPC, "simulated full disk")
+            return save(path, data, **kwargs)
+
+        with patch.object(client, "HOME", self.home), patch.object(lua_transport, "_observed", None), \
+                patch.object(lua_transport, "_last_cleanup", (None, 0.0)), \
+                patch.object(lua_transport.LuaClient, "health"), \
+                patch.object(lua_transport.LuaClient, "request"), \
+                patch.object(lua_transport, "ResolveOperations", return_value=ops), \
+                patch.object(lifecycle, "atomic_json", side_effect=fail_final_write), \
+                self.assertLogs("bridge.lua_transport", level="WARNING"):
+            result = lua_transport.call("status")
+            self.assertIsNone(lua_transport._observed)
+        self.assertTrue(result["online"])
+        self.assertIn("could not save", result["transport_warning"])
+        ops.dispatch.assert_called_once()
+        record = json.loads(next((self.home / "requests").glob("*.json")).read_text())
+        self.assertEqual(record["state"], "running")
+
     def test_auto_lua_dispatch_failure_never_replays_to_python(self):
         with patch.object(lua_transport, "probe", return_value={"connected": True}), \
              patch.object(lua_transport, "call", side_effect=client.BridgeCallError("outcome unknown")), \
@@ -406,6 +523,17 @@ class FileTransportTests(unittest.TestCase):
             with self.assertRaisesRegex(client.BridgeCallError, "unknown"):
                 transport.call("set_clip_transform", {"zoom": 2})
             direct.assert_not_called(); queue.assert_not_called()
+
+    def test_forced_lua_without_a_worker_does_not_write_or_probe_direct(self):
+        with patch.dict(os.environ, RESOLVE_AI_BRIDGE_MODE="lua"), \
+                patch.object(lua_transport, "probe", return_value={"connected": False}), \
+                patch.object(lua_transport, "call") as lua, patch.object(transport.direct, "probe") as direct, \
+                patch.object(client, "call") as queue:
+            with self.assertRaisesRegex(client.BridgeOffline, "No request was dispatched"):
+                transport.call("status")
+            self.assertIn("Start AI Bridge (Lua)", transport.offline_help())
+            self.assertNotIn("Py3", transport.offline_help())
+            lua.assert_not_called(); direct.assert_not_called(); queue.assert_not_called()
 
     def test_uncertain_reply_blocks_cleanup_mutations_too(self):
         connection = lua_transport.LuaClient(self.home)

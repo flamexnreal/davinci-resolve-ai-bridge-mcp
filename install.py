@@ -18,23 +18,15 @@ from pathlib import Path
 from bridge.operations import AGENT_VERSION as VERSION
 from bridge.lifecycle import WorkerLock, load_token, replace_token, private_directory, atomic_json
 ROOT = Path(__file__).resolve().parent
-HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser()
+HOME = Path(os.environ.get("RESOLVE_AI_BRIDGE_HOME", Path.home() / ".resolve-ai-bridge")).expanduser().absolute()
 TOKEN_FILE = HOME / "token.txt"
 
 MENU_FOLDER = "Resolve AI Bridge"
 CONFIG_BACKUPS_KEPT = 3
-# Stray scripts from earlier hand-made experiments that clutter Workspace >
-# Scripts. The installer moves any it finds out of Resolve's Utility folder into
-# a reversible backup rather than deleting them outright. Matching is by exact
-# name or by these prefixes.
-SUPERSEDED_SCRIPT_NAMES = {
-    "Resolve AI Bridge.py",
-    "Start Resolve AI Bridge.py",
-    "add_explosion_overlay.py",
-}
-SUPERSEDED_SCRIPT_PREFIXES = ("RFAIB_",)
+MENU_SCRIPTS = ("Start AI Bridge.py", "Bridge Status.py", "Stop AI Bridge.py",
+                "Start AI Bridge (Lua).lua", "Bridge Status (Lua).lua", "Stop AI Bridge (Lua).lua")
 CONSOLE_LINE = (
-    'import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),'
+    'import os;exec(open(os.path.join(os.path.expanduser(os.getenv("RESOLVE_AI_BRIDGE_HOME") or "~/.resolve-ai-bridge"),"ResolveConsole.py"),'
     'encoding="utf-8").read())'
 )
 LUA_CONSOLE_LINE = ('if fusion:GetData("ResolveAIBridge.NativeApp")~=tostring(fusion) then fusion:RunScript((os.getenv("RESOLVE_AI_BRIDGE_HOME") or '
@@ -79,6 +71,28 @@ def copy_runtime(runtime_home=None):
             fail("Incomplete staged runtime: " + name)
 
 
+def _is_installed_runtime(path):
+    return (path / "ResolveConsole.py").is_file() and (path / "bridge" / "server.py").is_file()
+
+
+def _is_runtime_link(path):
+    # Windows junctions are also aliases to other directories.
+    return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+
+
+def _check_install_destination(path):
+    if _is_runtime_link(path) or (path.exists() and not path.is_dir()):
+        fail("The bridge runtime must be a regular directory: %s" % path)
+    if not path.exists() or _is_installed_runtime(path):
+        return
+    entries = {item.name for item in path.iterdir()}
+    # A server started before installation may already have created the queue.
+    initialized_queue = {"token.txt", "inbox", "outbox"}
+    if not entries or initialized_queue <= entries <= initialized_queue | {"logs", "requests", "agent.json", "stop.json"}:
+        return
+    fail("Refusing to replace %s: it is not a recognized bridge runtime. Choose an empty runtime directory." % path)
+
+
 def prepare_runtime(skip=False, with_ffmpeg=False):
     """Stage dependencies before activation; retain previous runtime for recovery.
 
@@ -87,6 +101,9 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
     """
     global HOME
     destination = HOME
+    _check_install_destination(destination)
+    previous = destination.with_name(destination.name + ".previous")
+    _check_install_destination(previous)
     heartbeat = destination / "agent.json"
     from bridge import lua_transport
     if lua_transport.probe(destination).get("connected"):
@@ -98,7 +115,6 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
             active = True
         if active:
             fail("Stop the Console worker and MCP clients before updating this runtime.")
-    previous = destination.with_name(destination.name + ".previous")
     destination.parent.mkdir(parents=True, exist_ok=True)
     lock = destination.with_name(destination.name + ".install-lock")
     try:
@@ -109,6 +125,8 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
     worker_lock = None
     lua_operation_lock = None
     try:
+        _check_install_destination(destination)
+        _check_install_destination(previous)
         if not destination.exists() and previous.exists():
             os.replace(previous, destination)
         if destination.exists():
@@ -156,13 +174,17 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
             raise
     finally:
         HOME = destination
-        if stage is not None and stage.exists():
-            shutil.rmtree(stage)
-        if worker_lock is not None:
-            worker_lock.release()
-        if lua_operation_lock is not None:
-            lua_operation_lock.release()
-        lock.rmdir()
+        try:
+            if stage is not None and stage.exists():
+                shutil.rmtree(stage)
+        except OSError as exc:
+            print("Could not remove the abandoned staging folder %s: %s" % (stage, exc), file=sys.stderr)
+        finally:
+            if worker_lock is not None:
+                worker_lock.release()
+            if lua_operation_lock is not None:
+                lua_operation_lock.release()
+            lock.rmdir()
 
 
 def get_token(rotate=False):
@@ -294,61 +316,47 @@ def resolve_script_roots():
     ]
 
 
-def _is_superseded_script(name):
-    if name in SUPERSEDED_SCRIPT_NAMES:
-        return True
-    return any(name.startswith(prefix) for prefix in SUPERSEDED_SCRIPT_PREFIXES)
-
-
-def tidy_superseded_scripts():
-    """Move earlier stray Resolve scripts into a reversible backup folder.
-
-    Keeps Workspace > Scripts > Utility clean without destroying work: anything
-    matched is moved under HOME/removed-scripts-backup, never deleted, so the
-    user can restore or bin it themselves.
-    """
-    backup = HOME / "removed-scripts-backup"
-    moved = []
-    for root in resolve_script_roots():
-        utility = root / "Utility"
-        if not utility.is_dir():
-            continue
-        for entry in utility.iterdir():
-            if entry.is_file() and _is_superseded_script(entry.name):
-                try:
-                    backup.mkdir(parents=True, exist_ok=True)
-                    target = backup / entry.name
-                    if target.exists():
-                        target = backup / ("%s.%d%s" % (entry.stem, int(entry.stat().st_mtime), entry.suffix))
-                    shutil.move(str(entry), str(target))
-                    moved.append((str(entry), str(target)))
-                except OSError:
-                    continue
-    return moved
+def _menu_script_bytes(name):
+    source = ROOT / "agent" / "menu" / name
+    home = str(HOME.absolute())
+    if source.suffix == ".lua":
+        return source.read_bytes().replace(b"__BRIDGE_HOME__", json.dumps(home, ensure_ascii=False).encode("utf-8"))
+    return source.read_bytes().replace(b"INSTALLED_HOME = None  # runtime template",
+                                       ("INSTALLED_HOME = %r" % home).encode("utf-8"))
 
 
 def install_menu_scripts():
     """Copy the one-click launchers into Workspace > Scripts > Utility."""
-    source = ROOT / "agent" / "menu"
-    if not source.is_dir():
+    try:
+        scripts = {name: _menu_script_bytes(name) for name in MENU_SCRIPTS}
+    except OSError as exc:
+        print("      Could not read the bundled Resolve menu scripts: %s" % exc)
         return []
     installed = []
     roots = resolve_script_roots()
     existing = [root for root in roots if root.is_dir()]
-    targets = existing or roots[:1]
+    # Preserve existing Resolve locations, but an unwritable system-wide
+    # scripts folder must not prevent installing into the per-user default.
+    targets = existing + [root for root in roots[:1] if root not in existing]
     for root in targets:
+        if root not in existing and installed:
+            continue
         folder = root / "Utility" / MENU_FOLDER
         try:
             folder.mkdir(parents=True, exist_ok=True)
-            for script in sorted(source.iterdir()):
-                if script.suffix == ".py":
-                    shutil.copy2(script, folder / script.name)
-                elif script.suffix == ".lua":
-                    content = script.read_text(encoding="utf-8").replace(
-                        "__BRIDGE_HOME__", json.dumps(str(HOME.absolute()), ensure_ascii=False))
-                    (folder / script.name).write_text(content, encoding="utf-8")
+            for name, content in scripts.items():
+                with tempfile.NamedTemporaryFile(dir=folder, prefix=".menu-", delete=False) as handle:
+                    temporary = Path(handle.name)
+                    try:
+                        handle.write(content)
+                        handle.close()
+                        temporary.chmod(0o644)
+                        os.replace(temporary, folder / name)
+                    finally:
+                        temporary.unlink(missing_ok=True)
             installed.append(str(folder))
-        except OSError:
+        except OSError as exc:
+            print("      Could not install all Resolve menu scripts in %s: %s" % (folder, exc))
             continue
     return installed
 
@@ -357,10 +365,17 @@ def remove_menu_scripts():
     removed = []
     for root in resolve_script_roots():
         folder = root / "Utility" / MENU_FOLDER
-        if folder.is_dir():
+        if folder.is_dir() and not folder.is_symlink():
+            for name in MENU_SCRIPTS:
+                launcher = folder / name
+                try:
+                    if not launcher.is_symlink() and launcher.read_bytes() == _menu_script_bytes(name):
+                        launcher.unlink()
+                        removed.append(str(launcher))
+                except OSError:
+                    continue
             try:
-                shutil.rmtree(folder)
-                removed.append(str(folder))
+                folder.rmdir()  # Leave customized launchers and any user scripts in place.
             except OSError:
                 pass
     return removed
@@ -449,28 +464,21 @@ def auto_configure_clients(entry):
             config_path = Path(config_path)
             if not config_path.parent.is_dir():
                 return False
-            data = {}
-            if config_path.is_file():
-                try:
-                    data = json.loads(config_path.read_text(encoding="utf-8"))
-                except (ValueError, OSError) as exc:
-                    print("      Could not read %s configuration; left unchanged: %s" % (label, exc))
-                    return False
+            try:
+                original = config_path.read_bytes() if config_path.is_file() else None
+                data = json.loads(original.decode("utf-8")) if original is not None else {}
+            except (ValueError, OSError) as exc:
+                print("      Could not read %s configuration; left unchanged: %s" % (label, exc))
+                return False
             if not isinstance(data, dict) or ("mcpServers" in data and not isinstance(data["mcpServers"], dict)):
                 print("      Invalid %s configuration structure; left unchanged." % label)
                 return False
             data.setdefault("mcpServers", {})
+            if data["mcpServers"].get("resolve-ai-bridge") == entry:
+                if label not in configured:
+                    configured.append(label)
+                return True
             data["mcpServers"]["resolve-ai-bridge"] = entry
-            if config_path.is_file():
-                backup = config_path.with_name(config_path.name + ".backup-%d" % time.time_ns())
-                shutil.copy2(config_path, backup)
-                # Keep the newest few backups instead of one per install. copy2 keeps the
-                # config's own mtime, so order by the timestamp in the name.
-                backups = sorted((path for path in config_path.parent.glob(config_path.name + ".backup-*")
-                                  if path.name.rpartition("-")[2].isdigit()),
-                                 key=lambda path: int(path.name.rpartition("-")[2]))
-                for stale in backups[:-CONFIG_BACKUPS_KEPT]:
-                    stale.unlink(missing_ok=True)
             fd, temporary = tempfile.mkstemp(prefix="." + config_path.name, dir=str(config_path.parent))
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -478,16 +486,41 @@ def auto_configure_clients(entry):
                     handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
-                if config_path.exists():
+                if original is not None:
                     os.chmod(temporary, config_path.stat().st_mode & 0o777)
+                    backup = config_path.with_name(config_path.name + ".backup-%d" % time.time_ns())
+                    backup_fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    try:
+                        with os.fdopen(backup_fd, "wb") as handle:
+                            handle.write(original)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                    except OSError:
+                        backup.unlink(missing_ok=True)
+                        raise
+                current = config_path.read_bytes() if config_path.is_file() else None
+                if current != original:
+                    print("      %s configuration changed during setup; left unchanged. Rerun setup." % label)
+                    return False
                 os.replace(temporary, config_path)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
+            if original is not None:
+                # Prune only after publishing the new configuration successfully.
+                try:
+                    backups = sorted((path for path in config_path.parent.glob(config_path.name + ".backup-*")
+                                      if path.name.rpartition("-")[2].isdigit()),
+                                     key=lambda path: int(path.name.rpartition("-")[2]))
+                    for stale in backups[:-CONFIG_BACKUPS_KEPT]:
+                        stale.unlink(missing_ok=True)
+                except OSError as exc:
+                    print("      Updated %s; could not prune old backups: %s" % (label, exc))
             if label not in configured:
                 configured.append(label)
             return True
-        except OSError:
+        except OSError as exc:
+            print("      Could not update %s configuration: %s" % (label, exc))
             return False
 
     # 1. Claude Desktop
@@ -588,9 +621,13 @@ def probe_direct_attach():
 
 
 def remove_runtime():
+    if _is_runtime_link(HOME):
+        fail("Refusing to uninstall through a linked directory: %s" % HOME)
     if not HOME.exists():
         print("Nothing to remove at %s" % HOME)
         return
+    if not _is_installed_runtime(HOME):
+        fail("Refusing to remove %s: it is not a recognized bridge installation." % HOME)
     answer = input("Delete %s and its token? Type DELETE to confirm: " % HOME).strip()
     if answer != "DELETE":
         print("Uninstall cancelled.")
@@ -605,7 +642,7 @@ def remove_runtime():
 def main():
     parser = argparse.ArgumentParser(description="Install Resolve AI Bridge %s" % VERSION)
     parser.add_argument("--rotate-token", action="store_true", help="Create a new token and rewrite MCP snippets")
-    parser.add_argument("--skip-deps", action="store_true", help="Copy files without running pip")
+    parser.add_argument("--skip-deps", action="store_true", help="Skip installation of the MCP dependency")
     parser.add_argument("--no-menu", action="store_true", help="Skip the Workspace > Scripts menu entries")
     parser.add_argument("--with-ffmpeg", action="store_true", help="Install an optional private FFmpeg binary for Free-compatible frame/audio extraction")
     parser.add_argument("--uninstall", action="store_true", help="Remove the installed per-user runtime")
@@ -629,15 +666,12 @@ def main():
     print("[3/5] Writing the authenticated MCP configuration...")
     _entry, _config, claude_line, codex_line = write_configs(token)
     menu_paths = [] if args.no_menu else install_menu_scripts()
-    tidied = [] if args.no_menu else tidy_superseded_scripts()
-    print("[4/5] %s" % (
-        "Installed the Workspace > Scripts menu entries."
-        if menu_paths
-        else "Skipped the Workspace > Scripts menu entries."
-    ))
-    if tidied:
-        print("      Moved %d superseded script(s) out of the Scripts menu into %s"
-              % (len(tidied), HOME / "removed-scripts-backup"))
+    if args.no_menu:
+        print("[4/5] Skipped the Workspace > Scripts menu entries (--no-menu).")
+    elif menu_paths:
+        print("[4/5] Installed the Workspace > Scripts menu entries.")
+    else:
+        print("[4/5] Could not install the Workspace > Scripts menu entries. Use the Console fallback below.")
     skill_paths = install_skills()
     print("[5/5] Installed the Resolve editing skill in standard skill locations.")
     launcher_paths = install_global_launcher()
@@ -683,7 +717,7 @@ def main():
     else:
         print("        Resolve was not running during this check, so a direct attach could not be")
         print("        confirmed. Your AI may connect with no further steps. If it reports the")
-        print("        bridge as offline, use the one-click launcher below.")
+        print("        bridge as offline, use the Resolve startup instructions below.")
         if direct.get("reason"):
             print("        Check detail: %s" % direct["reason"])
 

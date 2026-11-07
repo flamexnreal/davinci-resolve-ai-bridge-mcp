@@ -206,6 +206,37 @@ class InstallerRegressionTests(unittest.TestCase):
             kwargs = run.call_args.kwargs
             self.assertEqual(kwargs["env"]["RESOLVE_AI_BRIDGE_HOME"], str(kwargs["cwd"]))
 
+    def test_failed_stage_cleanup_does_not_hide_error_or_leave_install_locked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "runtime"
+            home.mkdir()
+            (home / "bridge").mkdir()
+            (home / "bridge/server.py").touch()
+            (home / "ResolveConsole.py").touch()
+            (home / "original").write_text("installed data")
+            with patch.object(installer, "HOME", home), \
+                    patch.object(installer, "install_dependencies", side_effect=RuntimeError("pip failed")), \
+                    patch.object(installer.shutil, "rmtree", side_effect=PermissionError("file in use")):
+                with self.assertRaisesRegex(RuntimeError, "pip failed"):
+                    installer.prepare_runtime()
+            self.assertFalse(home.with_name(home.name + ".install-lock").exists())
+            self.assertEqual((home / "original").read_text(), "installed data")
+
+    def test_install_and_uninstall_leave_an_unrelated_directory_alone(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "projects"
+            home.mkdir()
+            project = home / "project.txt"
+            project.write_text("keep me")
+            with patch.object(installer, "HOME", home), patch("builtins.input", return_value="DELETE") as confirm:
+                with self.assertRaises(SystemExit):
+                    installer.prepare_runtime(skip=True)
+                with self.assertRaises(SystemExit):
+                    installer.remove_runtime()
+            confirm.assert_not_called()
+            self.assertEqual(project.read_text(), "keep me")
+            self.assertEqual(list(home.parent.iterdir()), [home])
+
 
 @unittest.skipIf(os.name == "nt", "POSIX mode bits; Windows permissions use ACLs")
 class QueuePermissionTests(unittest.TestCase):

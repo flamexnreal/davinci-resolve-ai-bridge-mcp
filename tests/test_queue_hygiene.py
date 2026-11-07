@@ -76,10 +76,20 @@ class QueueHygieneTests(unittest.TestCase):
         ancient_unknown = write("requests/ancient.json", {"state": "running"}, 31 * 86400)
         lua_unknown = write("requests/lua-unknown.json", {"state": "unknown"}, 8 * 86400)
         ancient_lua_unknown = write("requests/lua-ancient.json", {"state": "unknown"}, 31 * 86400)
+        corrupt_record = write("requests/corrupt.json", None, 8 * 86400)
+        unreadable = write("requests/unreadable.json", {"state": "running"}, 8 * 86400)
+        read = Path.read_text
+
+        def read_with_lock(path, *args, **kwargs):
+            if path == unreadable:
+                raise PermissionError("simulated sharing violation")
+            return read(path, *args, **kwargs)
         log = self.home / "logs" / "agent.log"
         log.write_bytes(b"x" * (lifecycle.LOG_MAX_BYTES + 1))
-        self.assertEqual(lifecycle.prune_runtime(self.home, now), 4)
+        with patch.object(Path, "read_text", read_with_lock):
+            self.assertEqual(lifecycle.prune_runtime(self.home, now), 4)
         self.assertTrue(fresh_reply.exists() and fresh_record.exists() and unknown.exists() and lua_unknown.exists())
+        self.assertTrue(corrupt_record.exists() and unreadable.exists())
         self.assertFalse(old_reply.exists() or old_record.exists() or ancient_unknown.exists() or ancient_lua_unknown.exists())
         self.assertFalse(log.exists())
         self.assertTrue((self.home / "logs" / "agent.log.1").exists())

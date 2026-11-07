@@ -13,8 +13,15 @@ your MCP server after upgrading from v1.13.1.
 
 For Console fallback, select **Lua** and use `lua-console-command.txt` from the
 runtime. Use **Stop AI Bridge (Lua)** to stop it after active work finishes.
+If the menu entry is missing, run `python3 tools/doctor.py --offline` (Windows:
+`py tools/doctor.py --offline`). Check **Workspace > Scripts Lua launcher**
+and **Installed Lua worker** separately. An installed Python launcher alone
+does not make the Lua entry available. Reinstall without `--no-menu`, then
+fully quit and reopen Resolve so it scans the menu again.
 Custom runtime folders work through their installed menu entries; the portable
 Console line uses the default home unless Resolve has `RESOLVE_AI_BRIDGE_HOME` set.
+For a new custom runtime, choose an empty directory. Setup and uninstall refuse
+to replace or remove a directory they do not recognize as a bridge installation.
 See [compatibility evidence](COMPATIBILITY.md) for measured scope and limitations.
 
 ## The One-Line Installer Downloads but Stops
