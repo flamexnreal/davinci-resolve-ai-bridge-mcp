@@ -14,6 +14,8 @@ OUTBOX_MAX_AGE = 3600           # unread replies: no client waits longer than a 
 REQUEST_RECORD_MAX_AGE = 7 * 86400
 UNKNOWN_RECORD_MAX_AGE = 30 * 86400  # Running/crashed and explicit unknown outcomes need longer recovery.
 LOG_MAX_BYTES = 1024 * 1024
+_WINDOWS = os.name == "nt"
+_REPLACE_RETRY_SECONDS = 0.5
 
 
 def private_directory(path):
@@ -24,7 +26,7 @@ def private_directory(path):
         path.chmod(0o700)
 
 
-def atomic_json(path, data, indent=None):
+def atomic_json(path, data, indent=None, *, deadline=None):
     """Write private JSON atomically, including the temporary file's first byte."""
     path = Path(path)
     temp = path.with_name(".%s.%s.tmp" % (path.name, uuid.uuid4().hex))
@@ -37,9 +39,36 @@ def atomic_json(path, data, indent=None):
                 os.fsync(handle.fileno())
             except OSError:
                 pass
-        os.replace(str(temp), str(path))
+        _publish_json(temp, path, deadline)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _publish_json(temp, path, deadline):
+    retry_until = None
+    while True:
+        if deadline is not None and time.time() >= deadline:
+            raise TimeoutError("Deadline expired before publishing the JSON request")
+        try:
+            os.replace(str(temp), str(path))
+            return
+        except PermissionError as exc:
+            if not _WINDOWS or getattr(exc, "winerror", None) not in (5, 32, 33):
+                raise
+            # Resolve (or a client) may briefly hold the destination open on
+            # Windows. A rejected rename leaves the old file in place. Retry
+            # only this unpublished temp file; a successful rename ends the loop.
+            now = time.monotonic()
+            if retry_until is None:
+                retry_until = now + _REPLACE_RETRY_SECONDS
+            delay = retry_until - now
+            if deadline is not None:
+                delay = min(delay, deadline - time.time())
+            if delay <= 0:
+                raise
+            time.sleep(min(0.01, delay))
+            if time.monotonic() >= retry_until:
+                raise
 
 
 def load_token(path):

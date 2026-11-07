@@ -12,7 +12,9 @@ compatibility on another Resolve build or platform.
 in an optional Lua 5.1 interpreter, including HMAC vectors, invalid/replayed
 requests, sessions, leases, expired deadlines and explicit truncation. Python
 checks cover partial native file writes, private staged IPC slots, custom homes
-and refusal to replay a failed Lua dispatch through another transport.
+and refusal to replay a failed Lua dispatch through another transport. The Lua
+worker and Python client are tested with injected file contention. Windows CI
+also checks replacement of a file held open by a real Windows read handle.
 
 ## Automated checks
 
@@ -40,6 +42,11 @@ and simulated Resolve objects.
 `tests/test_bootstrap.py` runs the actual `install.ps1` and `install.sh` against temporary ZIP/tar fixtures and a harmless Python installer. It covers the current archive folder name, renamed folders, Python/downloader fallbacks, argument forwarding, invalid archives, failed downloads, nonzero installer exits, and temporary-file cleanup. PowerShell also checks the documented `Invoke-Expression` route and restores the caller's working folder. Downloads are mocked; extraction and Python execution are real. No Resolve files or client settings are changed.
 
 These tests run with the full unittest suite. PowerShell cases run when `pwsh` or Windows PowerShell is available; otherwise they skip. To use a temporary PowerShell executable, set `RESOLVE_BRIDGE_TEST_POWERSHELL` to its absolute path. POSIX Bash cases skip on Windows. PowerShell is a test tool, not an added bridge dependency. These checks do not substitute for a live Windows/Resolve installation test.
+
+Client registration tests redirect the home folder and Windows profile paths
+(`APPDATA`, `LOCALAPPDATA`, `USERPROFILE`) into temporary directories. A
+regression verifies that an existing Claude Desktop config and its backup
+files outside the fixture are untouched.
 
 ## Manual Resolve Free integration checklist
 

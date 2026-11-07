@@ -1,5 +1,28 @@
 # Release Notes
 
+## v1.14.2 — Windows Lua reliability and installer test isolation (2026-11-07)
+
+Fixes intermittent Lua bridge failures on Windows and keeps installer tests
+from changing users’ Claude Desktop settings.
+
+### Fixed
+
+- Windows file contention no longer immediately fails a Lua inbox write. The
+  bridge briefly retries rejected file replacements before delivery and warns if
+  it cannot confirm Lua worker cleanup. Uncertain edits are never replayed.
+- Lua waits briefly for a busy native reply or heartbeat file to open. The MCP
+  client waits for the full reply line and checks the actual size of an inbox
+  request before sending it.
+- Installer tests use temporary Windows profile paths instead of changing the
+  real Claude Desktop or other client settings.
+
+### Validation and limits
+
+The fix passed automated checks on Windows, macOS, and Linux, including a
+real Windows file lock, simulated Lua transport contention without edit replay,
+and isolation of Windows client settings. Live Windows Resolve Free verification
+is still pending.
+
 ## v1.14.1 — Lua recovery cleanup and transport fixes (2026-11-01)
 
 This maintenance release fixes request-record retention and respects explicit
