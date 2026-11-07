@@ -1,6 +1,8 @@
 # Release Notes
 
-## Unreleased
+## v1.14.3 — Safer timeline edits, bridge recovery, and setup (2026-11-07)
+
+This patch protects timeline rebuilds, improves recovery when the bridge loses a reply, and keeps setup away from unrelated user files.
 
 ### Fixed
 
@@ -19,6 +21,12 @@
   scripts and runtime directories alone.
 - The doctor reports Python and Lua launchers separately, checks the files Lua
   needs to start, and handles invalid worker heartbeats.
+
+### Validation and limits
+
+The fixes passed automated checks on Windows, macOS, and Linux. The local suite ran 185 tests (177 passed and eight platform-specific cases skipped). The website build, npm package check, isolated MCP startup, and offline doctor also passed. These changes were not tested against a live Resolve instance.
+
+Changes: [#9](https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/pull/9).
 
 ## v1.14.2 — Windows Lua reliability and installer test isolation (2026-11-07)
 

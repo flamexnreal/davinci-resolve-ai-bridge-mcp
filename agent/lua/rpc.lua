@@ -3,7 +3,7 @@
 -- Host file transport and operation leases are maintained by Resolve AI Bridge.
 local json=require("json_raw")
 local sha=require("sha256")
-local M={MAX_HANDLES=4096,DEFAULT_MAX_ITEMS=2000,PROTOCOL_VERSION="1.0",SURFACE_VERSION="1.0",VERSION="1.14.2"}
+local M={MAX_HANDLES=4096,DEFAULT_MAX_ITEMS=2000,PROTOCOL_VERSION="1.0",SURFACE_VERSION="1.0",VERSION="1.14.3"}
 local OS_NAME=(jit and jit.os) or "Unknown"
 local ROOT_NAMES={resolve=true,project_manager=true,project=true,media_pool=true,current_timeline=true}
 local OperationError={}
