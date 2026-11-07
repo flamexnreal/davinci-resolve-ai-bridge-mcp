@@ -3,9 +3,11 @@
 import os
 import sys
 
+INSTALLED_HOME = None  # runtime template
+
 
 def main():
-    home = os.path.expanduser(os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge"))
+    home = INSTALLED_HOME or os.path.expanduser(os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge"))
     if home not in sys.path:
         sys.path.insert(0, home)
     try:

@@ -79,7 +79,8 @@ def describe():
     probe = direct.probe() if selected_mode not in ("console", "queue", "lua") and not use_lua else {
         "ok": False,
         "loadable": False,
-        "reason": "Direct attach disabled by RESOLVE_AI_BRIDGE_MODE=%s." % selected_mode,
+        "reason": ("Auto mode selected the running Lua worker." if selected_mode == "auto" else
+                   "Direct attach disabled by RESOLVE_AI_BRIDGE_MODE=%s." % selected_mode),
     }
     console = client.heartbeat()
     return {
@@ -103,9 +104,13 @@ def describe():
 def call(operation, params=None, timeout=30.0):
     """Run one operation over whichever transport is available."""
     selected_mode = mode()
-    if selected_mode == "lua" or (selected_mode == "auto" and lua_transport.probe().get("connected")):
+    lua = lua_transport.probe() if selected_mode in ("auto", "lua") else {}
+    if lua.get("connected"):
         # Never fall through after Lua dispatch: an uncertain edit is not replayed.
         return lua_transport.call(operation, params or {}, timeout=timeout), "lua"
+    if selected_mode == "lua":
+        raise client.BridgeOffline("The Lua worker is not reachable with RESOLVE_AI_BRIDGE_MODE=lua. "
+                                   "No request was dispatched. Use Start AI Bridge (Lua), then inspect status.")
     try:
         operations = direct_operations()
     except Exception:  # No dispatch has started, so Console fallback is safe.
@@ -134,19 +139,21 @@ def call(operation, params=None, timeout=30.0):
 
 
 def offline_help():
-    """A single actionable sentence for when neither transport is available."""
-    if mode() == "direct":
+    """Startup guidance for the selected transport."""
+    selected_mode = mode()
+    if selected_mode == "direct":
         return (
             "Open Resolve and check direct scripting availability (Studio: Preferences > System > "
             "General > External scripting using > Local). RESOLVE_AI_BRIDGE_MODE=direct disables "
             "worker fallback; set it to auto to use a Lua or Console worker."
         )
-    probe = direct.probe()
-    reason = probe.get("reason") or "Direct attach is unavailable."
-    return (
-        "Resolve is not reachable. %s Open DaVinci Resolve with a project. If tools still fail, "
-        "start the worker from Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, or paste "
-        "the line in ~/.resolve-ai-bridge/console-command.txt into Workspace > Console (Py3)."
-        " On Free 21.1+, choose Start AI Bridge (Lua), or use lua-console-command.txt in the Lua Console."
-        % reason
-    )
+    lua_help = ("Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge (Lua), "
+                "or use lua-console-command.txt in the Lua Console.")
+    python_help = ("On Python-enabled builds, choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge, "
+                   "or use console-command.txt in the Py3 Console.")
+    if selected_mode == "lua":
+        return "Open Resolve with a project. " + lua_help
+    if selected_mode in ("console", "queue"):
+        return ("Open Resolve with a project. " + python_help +
+                " On Free 21.1+, set RESOLVE_AI_BRIDGE_MODE to auto or lua, then start the Lua worker.")
+    return "Open Resolve with a project. On Free 21.1+, " + lua_help + " " + python_help

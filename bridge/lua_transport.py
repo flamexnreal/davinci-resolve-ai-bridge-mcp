@@ -19,6 +19,8 @@ MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 _LOG = logging.getLogger(__name__)
 _FINISH_WARNING = ("Could not confirm Lua worker cleanup. It may report busy until the operation "
                    "deadline. Check Bridge Status (Lua) and inspect the timeline before retrying.")
+_JOURNAL_WARNING = ("Resolve returned a result, but the bridge could not save the final request record. "
+                    "The record may still say running; inspect Resolve before retrying.")
 _observed = None
 _last_cleanup = (None, 0.0)
 
@@ -27,6 +29,10 @@ class _WireFailure(BaseException):
     # Optional API helpers in operations.py catch Exception and try fallbacks.
     # An uncertain RPC must escape those helpers to prevent a second mutation.
     pass
+
+
+class _ReplyFailure(_WireFailure):
+    """The request was published, but its outcome could not be read."""
 
 
 def _canonical(value):
@@ -73,51 +79,43 @@ class LuaClient:
         except OSError as exc:
             raise _WireFailure("Lua could not publish this request (%s). Earlier steps may have "
                                "completed; inspect Resolve before retrying." % exc) from exc
-        try:
-            raw = b""
-            while time.time() < self.deadline:
-                try:
-                    with (self.home / "lua-outbox.json").open("rb") as output:
-                        candidate = output.readline(MAX_MESSAGE_BYTES + 1)
-                    if len(candidate) > MAX_MESSAGE_BYTES:
-                        raise _WireFailure("Lua reply exceeds the size limit; inspect before retrying.")
-                    if not candidate.endswith(b"\n"):
-                        raise ValueError("Incomplete Lua reply line")
-                    envelope = json.loads(candidate)
-                    payload = envelope["payload"]
-                    expected = hmac.new(self.token.encode(), payload.encode(), hashlib.sha256).hexdigest()
-                    if not hmac.compare_digest(expected, envelope["signature"]):
-                        # A native write may momentarily combine new payload
-                        # bytes with the old signature. Retry reading only.
-                        raise ValueError("Lua reply signature mismatch")
-                    reply = json.loads(payload)
-                    if reply.get("id") == request["id"]:
-                        raw = candidate
-                        break
-                except (OSError, ValueError, KeyError, TypeError):
-                    pass
-                time.sleep(0.005)
-            if len(raw) > MAX_MESSAGE_BYTES or not raw.endswith(b"\n"):
-                raise ValueError("incomplete or oversized Lua reply")
-            envelope = json.loads(raw)
-            payload = envelope["payload"]
-            expected = hmac.new(self.token.encode(), payload.encode(), hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(expected, envelope["signature"]):
-                raise ValueError("Lua reply signature mismatch")
-            reply = json.loads(payload)
-            if reply.get("id") != request["id"]:
-                raise ValueError("Lua reply request ID mismatch")
-        except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise _WireFailure("Lua RPC failed (%s). Outcome unknown; inspect Resolve before retrying." % exc) from exc
-        if not reply.get("ok"):
-            error = reply.get("error") or {}
+        reply = self._read_reply(request["id"])
+        if not reply["ok"]:
+            error = reply["error"]
             if error.get("code") == "capability_unavailable":
                 raise AttributeError(error.get("message", "Resolve method unavailable"))
             raise _WireFailure("Lua RPC refused: %s. Inspect before retrying." % error)
         result = reply.get("result")
         if isinstance(result, dict) and result.get("truncated"):
-            raise _WireFailure("Lua reply was truncated; stopped rather than using incomplete timeline data.")
+            raise _ReplyFailure("Lua reply was truncated; stopped rather than using incomplete timeline data.")
         return result
+
+    def _read_reply(self, request_id):
+        problem = "reply not received"
+        while time.time() < self.deadline:
+            try:
+                with (self.home / "lua-outbox.json").open("rb") as output:
+                    candidate = output.readline(MAX_MESSAGE_BYTES + 1)
+                if len(candidate) > MAX_MESSAGE_BYTES:
+                    # The file may still hold a previous oversized reply.
+                    # Wait for replacement instead of aborting a new request.
+                    raise ValueError("Lua reply exceeds the size limit")
+                if not candidate.endswith(b"\n"):
+                    raise ValueError("Incomplete Lua reply line")
+                envelope = json.loads(candidate)
+                payload = envelope["payload"]
+                expected = hmac.new(self.token.encode(), payload.encode(), hashlib.sha256).hexdigest()
+                if not hmac.compare_digest(expected, envelope["signature"]):
+                    raise ValueError("Lua reply signature mismatch")
+                reply = json.loads(payload)
+                if reply.get("id") == request_id and isinstance(reply.get("ok"), bool):
+                    if reply["ok"] or isinstance(reply.get("error"), dict):
+                        return reply
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                # The worker writes directly into the slot. Retry reads only.
+                problem = str(exc)
+            time.sleep(0.005)
+        raise _ReplyFailure("Lua RPC failed (%s). Outcome unknown; inspect Resolve before retrying." % problem)
 
     def decode(self, value):
         if isinstance(value, dict):
@@ -231,6 +229,17 @@ def request_stop(home=None):
     return True
 
 
+def _write_terminal_record(record, data):
+    try:
+        lifecycle.atomic_json(record, data)
+    except OSError:
+        # Preserve the original outcome. A previous running record is the
+        # conservative fallback when finalization cannot be persisted.
+        _LOG.warning("Could not update Lua request record %s", record.name)
+        return False
+    return True
+
+
 def call(operation, params=None, timeout=30):
     """Serialize complete operations and bind edits to this client's observations."""
     global _observed, _last_cleanup
@@ -241,7 +250,7 @@ def call(operation, params=None, timeout=30):
             raise client.BridgeTimeout("Timed out before Lua dispatch; no new operation started.")
         time.sleep(0.05)
     record = None
-    begun = False
+    release_lease = False
     result = None
     try:
         # Lua-only sessions have no Python Console loop to prune recovery data.
@@ -256,38 +265,48 @@ def call(operation, params=None, timeout=30):
                 _last_cleanup = (connection.home, now)
         connection.health()
         connection.transaction = uuid.uuid4().hex
-        connection.request("begin_operation", {"deadline": connection.deadline})
-        begun = True
+        try:
+            connection.request("begin_operation", {"deadline": connection.deadline})
+        except _ReplyFailure:
+            # The worker may have accepted the lease before losing the reply.
+            # Cleanup is bound to our session and transaction, never an edit.
+            release_lease = True
+            raise
+        release_lease = True
         ops = ResolveOperations(lambda: _Proxy(connection, "resolve"), transport="lua")
         context = ops.queue_context()
         if operation not in QUEUE_READ_ONLY and _observed != {"session": connection.session, "context": context}:
             raise client.BridgeCallError("Inspect resolve_status or timeline_overview in this client before editing; Lua session/context changed.")
         request_id = uuid.uuid4().hex
         lifecycle.private_directory(connection.home / "requests")
-        record = connection.home / "requests" / (request_id + ".json")
+        pending_record = connection.home / "requests" / (request_id + ".json")
         data = {"id": request_id, "op": operation, "session": connection.session,
                 "context": context, "state": "running", "transport": "lua", "time": time.time()}
-        lifecycle.atomic_json(record, data)
+        lifecycle.atomic_json(pending_record, data)
+        record = pending_record
         result = ops.dispatch(operation, params or {})
         context = ops.queue_context()
         _observed = {"session": connection.session, "context": context}
         data.update(state="completed", result=result, context=context)
-        lifecycle.atomic_json(record, data)
+        if not _write_terminal_record(record, data):
+            _observed = None
+            if isinstance(result, dict):
+                result = dict(result, transport_warning=_JOURNAL_WARNING)
     except _WireFailure as exc:
         _observed = None
         if record is not None:
             data.update(state="unknown", error=str(exc))
-            lifecycle.atomic_json(record, data)
+            _write_terminal_record(record, data)
         raise client.BridgeCallError("%s Request record: %s. No automatic replay or Python fallback was sent."
                                      % (exc, record or "dispatch not started")) from exc
     except Exception as exc:
         if record is not None:
             data.update(state="failed", error=str(exc))
-            lifecycle.atomic_json(record, data)
+            _write_terminal_record(record, data)
         raise
     finally:
         # Handles are scoped to one complete operation, with the OS lock held.
-        if begun:
+        if release_lease:
             try:
                 # Finishing releases handles/lease only; it never retries an edit.
                 connection.deadline = time.time() + 2
@@ -295,6 +314,7 @@ def call(operation, params=None, timeout=30):
             except (Exception, _WireFailure):
                 _LOG.warning(_FINISH_WARNING)
                 if isinstance(result, dict):
-                    result = dict(result, transport_warning=_FINISH_WARNING)
+                    warning = result.get("transport_warning")
+                    result = dict(result, transport_warning=f"{warning} {_FINISH_WARNING}" if warning else _FINISH_WARNING)
         lock.release()
     return result

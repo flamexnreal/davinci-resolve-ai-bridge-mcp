@@ -47,22 +47,32 @@ function Invoke-WebRequest {
 }
 function Get-Command {
     param($Name, $ErrorAction)
-    if ($Name -eq $env:BRIDGE_BOOTSTRAP_COMMAND) {
+    if ($Name -in ($env:BRIDGE_BOOTSTRAP_COMMAND -split ",")) {
         return [pscustomobject]@{ Name = $Name }
     }
     return $null
 }
-function py {
-    & $env:BRIDGE_BOOTSTRAP_PYTHON @args
+function Invoke-FakePython {
+    param($Name, $PythonArgs)
+    if ($Name -eq "py") {
+        if ($PythonArgs[0] -ne "-3") { throw "Python launcher must select Python 3" }
+        $PythonArgs = @($PythonArgs | Select-Object -Skip 1)
+    }
+    if ($Name -eq $env:BRIDGE_BOOTSTRAP_OLD_COMMAND -and $PythonArgs[0] -eq "-c") {
+        $global:LASTEXITCODE = 1
+        return
+    }
+    & $env:BRIDGE_BOOTSTRAP_PYTHON @PythonArgs
     $global:LASTEXITCODE = $LASTEXITCODE
+}
+function py {
+    Invoke-FakePython py $args
 }
 function python3 {
-    & $env:BRIDGE_BOOTSTRAP_PYTHON @args
-    $global:LASTEXITCODE = $LASTEXITCODE
+    Invoke-FakePython python3 $args
 }
 function python {
-    & $env:BRIDGE_BOOTSTRAP_PYTHON @args
-    $global:LASTEXITCODE = $LASTEXITCODE
+    Invoke-FakePython python $args
 }
 $caught = $false
 $failureMessage = $null
@@ -131,10 +141,12 @@ class BootstrapFixture(unittest.TestCase):
 @unittest.skipUnless(POWERSHELL, "PowerShell is not installed")
 class PowerShellBootstrapTests(BootstrapFixture):
     def run_bootstrap(self, folders=("davinci-resolve-ai-bridge-mcp-main",),
-                      command="py", exit_code=0, pipeline=False, download_fail=False):
+                      command="py", exit_code=0, pipeline=False, download_fail=False,
+                      old_command="", expect_download=True):
         self.archive("zip", folders)
         self.env.update({
             "BRIDGE_BOOTSTRAP_COMMAND": command,
+            "BRIDGE_BOOTSTRAP_OLD_COMMAND": old_command,
             "BRIDGE_BOOTSTRAP_EXIT": str(exit_code),
             "BRIDGE_BOOTSTRAP_DOWNLOAD_FAIL": str(int(download_fail)),
             "BRIDGE_BOOTSTRAP_PIPELINE": str(int(pipeline)),
@@ -149,7 +161,7 @@ class PowerShellBootstrapTests(BootstrapFixture):
         )
         state = json.loads((self.root / "state.json").read_text(encoding="utf-8-sig"))
         self.assertEqual(Path(state["location"]).resolve(), self.cwd.resolve())
-        self.assertEqual(state["url"], ARCHIVE_URL + ".zip")
+        self.assertEqual(state["url"], ARCHIVE_URL + ".zip" if expect_download else None)
         self.assert_cleaned()
         return result, state
 
@@ -187,10 +199,21 @@ class PowerShellBootstrapTests(BootstrapFixture):
                 self.assertFalse(self.record.exists())
 
     def test_missing_python_is_reported(self):
-        result, state = self.run_bootstrap(command="missing")
+        result, state = self.run_bootstrap(command="missing", expect_download=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Python 3.10 or newer is required", state["error"])
         self.assertFalse(self.record.exists())
+
+    def test_old_python_is_skipped_or_rejected_before_downloading(self):
+        result, state = self.run_bootstrap(command="py", old_command="py", expect_download=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Python 3.10 or newer is required", state["error"])
+        self.assertFalse(self.record.exists())
+
+        result, state = self.run_bootstrap(command="py,python", old_command="py")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIsNone(state["error"])
+        self.assertEqual(self.installed()["args"], INSTALL_ARGS)
 
     def test_download_failure_cleans_up(self):
         result, state = self.run_bootstrap(download_fail=True)

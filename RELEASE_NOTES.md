@@ -1,5 +1,25 @@
 # Release Notes
 
+## Unreleased
+
+### Fixed
+
+- Splits and dialogue rebuilds verify the active timeline before replacing or
+  appending clips. Timeline navigation checks the selected timeline, and tool
+  replies distinguish unavailable render data and unverified results from
+  confirmed edits.
+- The Lua worker rejects ambiguous or malformed requests. A lost startup reply
+  can release only its own operation lease. Stale replies and recovery-record
+  write errors no longer hide a later valid reply or a confirmed result.
+- The Python queue rejects invalid deadlines and mismatched replies. An
+  uncertain result requires fresh inspection before editing; temporarily
+  unreadable journals are retained for recovery.
+- Menu launchers respect custom runtime paths. The installer preserves existing
+  backups until configuration updates succeed and leaves unrelated Resolve menu
+  scripts and runtime directories alone.
+- The doctor reports Python and Lua launchers separately, checks the files Lua
+  needs to start, and handles invalid worker heartbeats.
+
 ## v1.14.2 — Windows Lua reliability and installer test isolation (2026-11-07)
 
 Fixes intermittent Lua bridge failures on Windows and keeps installer tests

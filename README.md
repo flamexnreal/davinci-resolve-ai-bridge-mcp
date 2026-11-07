@@ -104,7 +104,7 @@ if fusion:GetData("ResolveAIBridge.NativeApp")~=tostring(fusion) then fusion:Run
 On Python-enabled builds, select **Py3** and use:
 
 ```python
-import os;exec(open(os.path.expanduser("~/.resolve-ai-bridge/ResolveConsole.py"),encoding="utf-8").read())
+import os;exec(open(os.path.join(os.path.expanduser(os.getenv("RESOLVE_AI_BRIDGE_HOME") or "~/.resolve-ai-bridge"),"ResolveConsole.py"),encoding="utf-8").read())
 ```
 
 **Live startup validation:** macOS, DaVinci Resolve **Free 21.0.3.7**, Python **3.14.6**: menu start, real status requests, repeated start, Stop, quit/reopen/start, and Console fallback passed. The separate native-file Lua connector supports the tested Free 21.1.2 build. Windows/Linux and other builds still need live verification.

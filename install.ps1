@@ -1,4 +1,30 @@
 $ErrorActionPreference = "Stop"
+$python = $null
+$pythonPrefix = @()
+foreach ($candidate in @("py", "python3", "python")) {
+    if (-not (Get-Command $candidate -ErrorAction SilentlyContinue)) {
+        continue
+    }
+    $prefix = @()
+    if ($candidate -eq "py") {
+        $prefix = @("-3")
+    }
+    try {
+        & $candidate @prefix -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' *> $null
+        if ($LASTEXITCODE -eq 0) {
+            $python = $candidate
+            $pythonPrefix = $prefix
+            break
+        }
+    } catch {
+        # A broken launcher or Store alias should not hide a usable Python.
+        continue
+    }
+}
+if (-not $python) {
+    throw "Python 3.10 or newer is required. Install it from https://www.python.org/downloads/ and reopen PowerShell before trying again."
+}
+
 Write-Host "==> Downloading and installing DaVinci Resolve AI Bridge..."
 
 $previousLocation = Get-Location
@@ -19,15 +45,7 @@ try {
     }
     Set-Location -LiteralPath $projectFolders[0].FullName
 
-    if (Get-Command py -ErrorAction SilentlyContinue) {
-        & py install.py @args
-    } elseif (Get-Command python3 -ErrorAction SilentlyContinue) {
-        & python3 install.py @args
-    } elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        & python install.py @args
-    } else {
-        throw "Python 3.10 or newer is required. Install it from https://www.python.org/downloads/ and reopen PowerShell before trying again."
-    }
+    & $python @pythonPrefix install.py @args
     if ($LASTEXITCODE -ne 0) {
         throw "Resolve AI Bridge installation failed (exit code $LASTEXITCODE). See the installer output above."
     }

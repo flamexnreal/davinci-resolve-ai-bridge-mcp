@@ -156,10 +156,7 @@ local ok, err = xpcall(function()
     end
     -- A dead client cannot hold the worker indefinitely. Native calls are
     -- synchronous here; an expired lease is released only after that call ends.
-    if ops.transaction and now > ops.transaction_deadline then
-      ops:op_release_handles({})
-      ops.transaction, ops.transaction_deadline = nil, nil
-    end
+    ops:expire_operation(now)
     if stop_pending and not ops.transaction then break end
     local raw = read_file(home .. "/lua-inbox.json", true)
     if raw and raw ~= last and #raw > 2 then

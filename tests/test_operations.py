@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from bridge.operations import ResolveOperations, OperationError
 from fakes import Clip, Media, Project, Resolve
@@ -71,6 +72,50 @@ class OperationTests(unittest.TestCase):
         with patch.object(self.timeline,'DuplicateTimeline',return_value=None):
             with self.assertRaises(OperationError):self.op._op_split_clip({'frame':50})
         self.assertEqual(self.timeline.delete_calls,0)
+    def test_split_never_deletes_if_original_timeline_did_not_reactivate(self):
+        original = self.timeline
+
+        def pretend_to_switch(timeline):
+            if timeline is not original:
+                self.project.current = timeline
+            return True
+
+        with patch.object(self.project, "SetCurrentTimeline", side_effect=pretend_to_switch), \
+             patch.object(self.project.pool, "AppendToTimeline") as append:
+            with self.assertRaisesRegex(OperationError, "Could not open the requested timeline"):
+                self.op._op_split_clip({"frame": 50})
+        append.assert_not_called()
+        self.assertEqual(original.delete_calls, 0)
+        self.assertEqual([(clip.start, clip.end) for clip in original.clips], [(0, 100)])
+
+    def test_dialogue_rebuild_stops_if_active_timeline_changes_after_preview_delete(self):
+        original = self.timeline
+        marker = self.add_review()
+        delete = type(original).DeleteClips
+
+        def delete_then_switch(timeline, items, ripple):
+            deleted = delete(timeline, items, ripple)
+            self.project.current = original
+            return deleted
+
+        with patch.object(type(original), "DeleteClips", delete_then_switch), \
+             patch.object(self.project.pool, "AppendToTimeline") as append:
+            with self.assertRaisesRegex(OperationError, "active timeline changed.*Original .* is intact"):
+                self.op._op_apply_silence_cuts({"marker_ids": [marker]})
+        append.assert_not_called()
+        self.assertEqual(original.delete_calls, 0)
+        self.assertEqual([(clip.start, clip.end) for clip in original.clips], [(0, 100)])
+
+    def test_open_timeline_does_not_guess_between_conflicting_or_ambiguous_selectors(self):
+        duplicate = self.timeline.DuplicateTimeline(self.timeline.GetName())
+        with self.assertRaisesRegex(OperationError, "ambiguous"):
+            self.op._op_open_timeline({"name": duplicate.GetName()})
+        with self.assertRaisesRegex(OperationError, "exactly one"):
+            self.op._op_open_timeline({"timeline_id": duplicate.GetUniqueId(), "index": 1})
+        self.assertIs(self.project.current, self.timeline)
+        self.op._op_open_timeline({"timeline_id": duplicate.GetUniqueId()})
+        self.assertIs(self.project.current, duplicate)
+
     def test_health_reports_missing_media_and_delivery(self):
         self.timeline.clips[0].media.props['File Path']='/does-not-exist/fixture.mov'
         r=self.op._op_project_health({'expected_width':3840})
@@ -97,6 +142,62 @@ class OperationTests(unittest.TestCase):
         self.assertEqual(r['jobs'][0]['output'],str(Path('/out')/'a.mp4'))
         with self.assertRaises(OperationError):self.op._op_render_status({'job_id':'missing'})
         self.project.GetRenderJobList=lambda:[];self.assertEqual(self.op._op_render_status({})['jobs'],[])
+    def test_render_status_distinguishes_unavailable_from_idle_and_empty(self):
+        with self.assertRaisesRegex(OperationError, "did not return a usable render queue"):
+            self.op._op_render_status({})
+        self.project.GetRenderJobList = lambda: {"1": {"JobId": "render-1"}}
+        result = self.op._op_render_status({})
+        self.assertEqual(result["jobs"][0]["job_id"], "render-1")
+        self.assertIsNone(result["rendering"])
+        self.project.IsRenderingInProgress = lambda: False
+        self.project.GetRenderJobList = lambda: {}  # empty table from Lua
+        result = self.op._op_render_status({})
+        self.assertEqual(result["jobs"], [])
+        self.assertIs(result["rendering"], False)
+
+    def test_compound_clip_never_reports_source_as_new_item(self):
+        source = self.timeline.clips[0]
+        self.timeline.CreateCompoundClip = Mock(return_value=True)
+        result = self.op._op_create_compound_clip({"item_id": source.GetUniqueId()})
+        self.assertIsNone(result["created_compound_clip"]["id"])
+        self.assertIsNone(result["created_compound_clip"]["start_frame"])
+        self.assertIn("Inspect timeline_overview", result["note"])
+
+    def test_title_text_requires_readback_and_supports_explicit_setter(self):
+        clip = self.timeline.clips[0]
+        self.timeline.InsertFusionTitleIntoTimeline = Mock(return_value=clip)
+        inputs = {"StyledText": "Original"}
+        title = SimpleNamespace(GetInput=inputs.get, SetInput=Mock(return_value=True))
+        clip.fusion = SimpleNamespace(GetToolList=lambda _selected: {1: title})
+        self.assertFalse(self.op._op_insert_title({"text": "Requested"})["text_set"])
+        title.SetInput = inputs.__setitem__  # no boolean return; check the real value
+        self.assertTrue(self.op._op_insert_title({"text": "Requested"})["text_set"])
+        self.assertEqual(inputs["StyledText"], "Requested")
+
+    def test_title_never_falls_back_after_an_uncertain_lua_setter(self):
+        from bridge.lua_transport import _WireFailure
+
+        clip = self.timeline.clips[0]
+        self.timeline.InsertFusionTitleIntoTimeline = Mock(return_value=clip)
+        title = SimpleNamespace(GetInput=lambda _attribute: "Previous", SetInput=Mock(side_effect=_WireFailure("lost reply")))
+        other_tool = SimpleNamespace(GetInput=lambda _attribute: "Previous", SetInput=Mock())
+        clip.fusion = SimpleNamespace(GetToolList=lambda _selected: {1: title, 2: other_tool})
+        with self.assertRaises(_WireFailure):
+            self.op._op_insert_title({"text": "Requested"})
+        title.SetInput.assert_called_once_with("StyledText", "Requested")
+        other_tool.SetInput.assert_not_called()
+
+    def test_capabilities_find_decoder_in_explicit_runtime(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            decoder = home / "fixture-ffmpeg.exe"
+            decoder.touch()
+            decoder.chmod(0o700)
+            (home / "ffmpeg-path.txt").write_text(decoder.name)
+            op = ResolveOperations(lambda: Resolve(self.project), runtime_home=home)
+            with patch.dict("os.environ", {"RESOLVE_AI_BRIDGE_HOME": str(home / "wrong"), "RESOLVE_AI_BRIDGE_FFMPEG": ""}), \
+                 patch("shutil.which", return_value=None):
+                self.assertTrue(op._op_bridge_capabilities({})["source_frame_decoder"])
     def test_edits_are_read_back(self):
         clip=self.timeline.clips[0];item=clip.GetUniqueId()
         self.assertEqual(self.op._op_set_clip_property({'item_id':item,'property_name':'ZoomX','value':2})['read_back'],2)

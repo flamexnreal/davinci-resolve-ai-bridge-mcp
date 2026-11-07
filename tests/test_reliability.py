@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from bridge import client, transport
+from bridge import client, lifecycle, transport
 
 ROOT = Path(__file__).resolve().parents[1]
 with patch.dict(os.environ, RESOLVE_AI_BRIDGE_NO_AUTOSTART="1"):
@@ -102,6 +102,28 @@ class ReliabilityTests(unittest.TestCase):
             self.assertFalse(self.result(name)["ok"])
         self.ops.dispatch.assert_not_called()
 
+    def test_nonfinite_deadline_never_dispatches_a_queued_edit(self):
+        for name, value in (("nan", float("nan")), ("infinity", float("inf"))):
+            path, _ = self.request(name, deadline=value)
+            self.runtime._process(path)
+            self.assertIn("expired before execution", self.result(name)["error"])
+        self.ops.dispatch.assert_not_called()
+
+    def test_nonfinite_worker_heartbeat_is_offline(self):
+        lifecycle.atomic_json(client.HEARTBEAT_FILE, {"time": float("nan"), "queue_protocol": 2})
+        self.assertIsNone(client.heartbeat())
+
+    def test_mismatched_reply_reports_unknown_and_requires_fresh_inspection(self):
+        def reply_in_wrong_session(path, request):
+            response = {"id": request["id"], "ok": True, "session": "wrong", "result": {"edited": True}}
+            lifecycle.atomic_json(client.OUTBOX / path.name, response)
+
+        with patch.object(client, "_atomic_json", side_effect=reply_in_wrong_session):
+            with self.assertRaisesRegex(client.BridgeCallError, "Outcome unknown"):
+                client.call("add_marker", timeout=1)
+            with self.assertRaisesRegex(client.BridgeCallError, "Inspect status"):
+                client.call("add_marker", timeout=1)
+
     def test_duplicate_and_restart_unknown_outcome(self):
         path, request = self.request()
         self.runtime._process(path)
@@ -117,6 +139,29 @@ class ReliabilityTests(unittest.TestCase):
         self.assertEqual(self.ops.dispatch.call_count, 1)
         self.assertEqual(json.loads(record.read_text())["state"], "running")
 
+    def test_completed_edit_is_reported_if_final_journal_write_fails(self):
+        path, request = self.request()
+        write = console._atomic_json
+
+        def fail_final_record(target, payload):
+            if target.parent.name == "requests" and payload.get("state") == "completed":
+                raise PermissionError("simulated recovery record lock")
+            return write(target, payload)
+
+        with patch.object(console, "_atomic_json", side_effect=fail_final_record):
+            self.runtime._process(path)
+        reply = self.result()
+        self.assertTrue(reply["ok"])
+        self.assertTrue(reply["recovery_record_pending"])
+        self.assertTrue(reply["result"]["edited"])
+        self.assertIn("recovery record", reply["result"]["transport_warning"])
+        self.assertFalse(self.runtime.state["busy"])
+        self.assertEqual(json.loads((self.home / "requests/a.json").read_text())["state"], "running")
+        console._atomic_json(path, request)
+        self.runtime._process(path)
+        self.assertIn("unknown", self.result()["error"])
+        self.assertEqual(self.ops.dispatch.call_count, 1)
+
     def test_long_job_heartbeat_and_client_timeout(self):
         entered, release = threading.Event(), threading.Event()
         def job(*args):
@@ -127,6 +172,7 @@ class ReliabilityTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(client.BridgeTimeout, "not confirmed cancellation"):
                 client.call("add_marker", timeout=.2)
+            self.assertIsNone(client._observed)
             self.assertTrue(entered.is_set())
             time.sleep(1.1)
             beat = client.heartbeat(max_age=1.1)
@@ -183,6 +229,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_install_failure_preserves_runtime(self):
         console.HEARTBEAT_FILE.unlink()
         (self.home / "bridge").mkdir()
+        (self.home / "bridge/server.py").touch()
+        (self.home / "ResolveConsole.py").touch()
         original = self.home / "bridge/original.py"
         original.write_text("old working runtime")
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies", side_effect=RuntimeError("pip failed")):
@@ -193,6 +241,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_successful_update_retains_previous_and_token(self):
         console.HEARTBEAT_FILE.unlink()
         (self.home / "bridge").mkdir()
+        (self.home / "bridge/server.py").touch()
+        (self.home / "ResolveConsole.py").touch()
         (self.home / "bridge/original.py").write_text("old")
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies"):
             installer.prepare_runtime(skip=True)
@@ -212,6 +262,8 @@ class ReliabilityTests(unittest.TestCase):
     def test_interrupted_activation_restores_runtime(self):
         console.HEARTBEAT_FILE.unlink()
         (self.home / "bridge").mkdir()
+        (self.home / "bridge/server.py").touch()
+        (self.home / "ResolveConsole.py").touch()
         original = self.home / "bridge/original.py"
         original.write_text("old")
         replace = os.replace

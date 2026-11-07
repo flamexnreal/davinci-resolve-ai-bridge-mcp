@@ -9,7 +9,8 @@ import json
 import os
 import time
 
-HOME = os.path.expanduser(
+INSTALLED_HOME = None  # runtime template
+HOME = INSTALLED_HOME or os.path.expanduser(
     os.environ.get("RESOLVE_AI_BRIDGE_HOME", "~/.resolve-ai-bridge")
 )
 
@@ -33,16 +34,19 @@ def main():
         return
 
     heartbeat = read_json(os.path.join(HOME, "agent.json"))
-    if heartbeat:
-        age = time.time() - float(heartbeat.get("time", 0))
-        state = "running" if age < 25 else "stale (%.0fs old)" % age
+    try:
+        age = time.time() - float(heartbeat["time"]) if isinstance(heartbeat, dict) else None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        age = None
+    if age is not None and -10 <= age <= 25:
+        state = "running"
         print("\nBridge worker: %s" % state)
         print("  Project:  %s" % (heartbeat.get("project") or "none open"))
         print("  Timeline: %s" % (heartbeat.get("timeline") or "none open"))
         print("  Requests served: %s" % heartbeat.get("served", 0))
         print("  Version: %s" % heartbeat.get("agent_version", "unknown"))
     else:
-        print("\nBridge worker: not running")
+        print("\nBridge worker: not running or heartbeat invalid/stale")
         print("  Choose Workspace > Scripts > Resolve AI Bridge > Start AI Bridge.")
         print("  Your AI client may still reach Resolve directly, which needs no worker.")
 

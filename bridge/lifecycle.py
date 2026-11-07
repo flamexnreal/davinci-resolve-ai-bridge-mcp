@@ -133,12 +133,15 @@ def prune_runtime(home, now=None):
     for path in (home / "requests").glob("*.json"):
         if not old(path, REQUEST_RECORD_MAX_AGE):
             continue
-        try:
-            unknown = json.loads(path.read_text(encoding="utf-8")).get("state") in ("running", "unknown")
-        except (OSError, ValueError, AttributeError):
-            unknown = False
-        if unknown and not old(path, UNKNOWN_RECORD_MAX_AGE):
-            continue
+        if not old(path, UNKNOWN_RECORD_MAX_AGE):
+            try:
+                state = json.loads(path.read_text(encoding="utf-8")).get("state")
+            except (OSError, ValueError, AttributeError):
+                # A sharing violation or damaged file cannot establish that the
+                # operation is settled. Keep its recovery evidence longer.
+                continue
+            if state not in ("completed", "failed"):
+                continue
         path.unlink(missing_ok=True)
         removed += 1
     log = home / "logs" / "agent.log"
@@ -197,7 +200,7 @@ def fresh_state(home):
     data = read_state(home)
     try:
         return data if -10 <= time.time() - float(data.get("time", 0)) <= 25 else {}
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return {}
 
 
