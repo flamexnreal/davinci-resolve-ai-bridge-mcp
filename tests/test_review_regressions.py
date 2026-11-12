@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from bridge import client
+from bridge import client, lifecycle, lua_transport
 from bridge.operations import OperationError, ResolveOperations
 from fakes import Clip, Media, Project, Resolve, Timeline
 from installer_fakes import isolated_user_profile
@@ -188,7 +188,8 @@ class InstallerRegressionTests(unittest.TestCase):
             with patch.object(installer, "HOME", home), patch.object(installer, "install_dependencies"), \
                     patch.object(installer.subprocess, "run", side_effect=run):
                 for _ in range(2):
-                    installer.prepare_runtime(skip=True, with_ffmpeg=True)
+                    with installer.prepare_runtime(skip=True, with_ffmpeg=True):
+                        pass
                     with patch.dict(os.environ, RESOLVE_AI_BRIDGE_HOME=str(home)), \
                             patch.dict(os.environ, {"RESOLVE_AI_BRIDGE_FFMPEG": ""}), \
                             patch("shutil.which", return_value=None):
@@ -202,7 +203,8 @@ class InstallerRegressionTests(unittest.TestCase):
             home = Path(directory) / "runtime"
             with patch.object(installer, "HOME", home), patch.object(installer, "install_dependencies"), \
                     patch.object(installer.subprocess, "run") as run:
-                installer.prepare_runtime()
+                with installer.prepare_runtime():
+                    pass
             kwargs = run.call_args.kwargs
             self.assertEqual(kwargs["env"]["RESOLVE_AI_BRIDGE_HOME"], str(kwargs["cwd"]))
 
@@ -218,7 +220,8 @@ class InstallerRegressionTests(unittest.TestCase):
                     patch.object(installer, "install_dependencies", side_effect=RuntimeError("pip failed")), \
                     patch.object(installer.shutil, "rmtree", side_effect=PermissionError("file in use")):
                 with self.assertRaisesRegex(RuntimeError, "pip failed"):
-                    installer.prepare_runtime()
+                    with installer.prepare_runtime():
+                        pass
             self.assertFalse(home.with_name(home.name + ".install-lock").exists())
             self.assertEqual((home / "original").read_text(), "installed data")
 
@@ -230,12 +233,66 @@ class InstallerRegressionTests(unittest.TestCase):
             project.write_text("keep me")
             with patch.object(installer, "HOME", home), patch("builtins.input", return_value="DELETE") as confirm:
                 with self.assertRaises(SystemExit):
-                    installer.prepare_runtime(skip=True)
+                    with installer.prepare_runtime(skip=True):
+                        pass
                 with self.assertRaises(SystemExit):
                     installer.remove_runtime()
             confirm.assert_not_called()
             self.assertEqual(project.read_text(), "keep me")
             self.assertEqual(list(home.parent.iterdir()), [home])
+
+    def test_uninstall_refuses_active_workers_and_maintenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / "runtime"
+            marker = home.with_name(home.name + ".install-lock")
+            with patch.object(installer, "HOME", home), patch.object(installer, "install_dependencies"):
+                with installer.prepare_runtime(skip=True):
+                    with patch("builtins.input") as confirm, self.assertRaises(SystemExit):
+                        installer.remove_runtime()
+                    confirm.assert_not_called()
+                    self.assertTrue(marker.is_dir())
+                for suffix in ("", ".lua-operation"):
+                    with self.subTest(lock=suffix):
+                        worker = lifecycle.WorkerLock(home.with_name(home.name + suffix))
+                        self.assertTrue(worker.acquire())
+                        try:
+                            with patch("builtins.input") as confirm, self.assertRaises(SystemExit):
+                                installer.remove_runtime()
+                            confirm.assert_not_called()
+                            self.assertFalse(marker.exists())
+                        finally:
+                            worker.release()
+                with patch.object(lua_transport, "probe", return_value={"connected": True}), \
+                        patch("builtins.input") as confirm, self.assertRaises(SystemExit):
+                    installer.remove_runtime()
+                confirm.assert_not_called()
+                self.assertTrue((home / "bridge" / "server.py").is_file())
+                self.assertFalse(marker.exists())
+
+    def test_cancelled_uninstall_can_be_retried_and_preserves_custom_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory)
+            home = profile / "runtime"
+            root = profile / "scripts"
+            menu = root / "Utility" / installer.MENU_FOLDER
+            with patch.object(installer, "HOME", home), patch.object(installer, "install_dependencies"), \
+                    patch.object(installer, "resolve_script_roots", return_value=[root]):
+                with installer.prepare_runtime(skip=True):
+                    installer.install_menu_scripts()
+                custom = menu / "Start AI Bridge.py"
+                custom.write_text("# Custom launcher", encoding="utf-8")
+                with patch("builtins.input", return_value="NO"):
+                    installer.remove_runtime()
+                self.assertTrue(home.is_dir())
+                with patch.object(lua_transport, "probe", side_effect=[{"connected": False}, {"connected": True}]), \
+                        patch("builtins.input", return_value="DELETE"), self.assertRaises(SystemExit):
+                    installer.remove_runtime()
+                self.assertTrue(home.is_dir())
+                with patch("builtins.input", return_value="DELETE"):
+                    installer.remove_runtime()
+            self.assertFalse(home.exists())
+            self.assertEqual(list(menu.iterdir()), [custom])
+            self.assertEqual(custom.read_text(encoding="utf-8"), "# Custom launcher")
 
 
 @unittest.skipIf(os.name == "nt", "POSIX mode bits; Windows permissions use ACLs")

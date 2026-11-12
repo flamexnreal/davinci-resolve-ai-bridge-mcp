@@ -45,6 +45,44 @@ class OperationTests(unittest.TestCase):
             self.op._op_split_clip({'frame':50})
         self.assertIsNot(self.project.current,self.timeline)
         self.assertEqual([(c.start,c.end) for c in self.project.current.clips],[(0,100)])
+
+    def test_split_does_not_append_if_resolve_reports_a_delete_but_leaves_the_clip(self):
+        with patch.object(self.timeline, "DeleteClips", return_value=True) as delete, \
+                patch.object(self.project.pool, "AppendToTimeline") as append:
+            with self.assertRaisesRegex(OperationError, "Could not verify clip removal.*opened the checkpoint"):
+                self.op._op_split_clip({"frame": 50})
+        delete.assert_called_once()
+        append.assert_not_called()
+        self.assertEqual(len(self.timeline.clips), 1)
+        self.assertIsNot(self.project.current, self.timeline)
+
+    def test_delete_reports_unverified_if_resolve_removes_a_different_clip(self):
+        target = self.timeline.clips[0]
+        other = Clip(100, 200)
+        self.timeline.clips.append(other)
+
+        def delete_other(*args):
+            self.timeline.clips.remove(other)
+            return True
+
+        with patch.object(self.timeline, "DeleteClips", side_effect=delete_other) as delete:
+            with self.assertRaisesRegex(OperationError, "Could not verify clip removal"):
+                self.op._op_delete_clips({"item_ids": [target.uid]})
+        delete.assert_called_once()
+        self.assertEqual(self.timeline.clips, [target])
+
+    def test_delete_handles_aliases_and_a_track_that_becomes_empty(self):
+        target = self.timeline.clips[0]
+        result = self.op._op_delete_clips({"item_ids": [target.uid, "V1.1"], "ripple": True})
+        self.assertEqual(result, {"deleted": [target.uid], "ripple": True})
+        self.assertEqual(self.timeline.clips, [])
+        self.assertEqual(self.timeline.delete_calls, 1)
+
+    def test_missing_id_does_not_match_a_clip_with_no_stable_id(self):
+        self.timeline.clips[0].uid = None
+        with self.assertRaisesRegex(OperationError, "Timeline item not found"):
+            self.op._op_delete_clips({"item_ids": ["None"]})
+        self.assertEqual(self.timeline.delete_calls, 0)
     def test_split_refuses_fusion_before_mutation(self):
         self.timeline.clips[0].fusion=object()
         with self.assertRaises(OperationError):self.op._op_split_clip({'frame':50})
@@ -104,6 +142,16 @@ class OperationTests(unittest.TestCase):
                 self.op._op_apply_silence_cuts({"marker_ids": [marker]})
         append.assert_not_called()
         self.assertEqual(original.delete_calls, 0)
+        self.assertEqual([(clip.start, clip.end) for clip in original.clips], [(0, 100)])
+
+    def test_dialogue_rebuild_stops_if_copied_clips_remain(self):
+        original = self.timeline
+        marker = self.add_review()
+        with patch.object(type(original), "DeleteClips", return_value=True), \
+                patch.object(self.project.pool, "AppendToTimeline") as append:
+            with self.assertRaisesRegex(OperationError, "Could not verify clip removal.*Original .* is intact"):
+                self.op._op_apply_silence_cuts({"marker_ids": [marker]})
+        append.assert_not_called()
         self.assertEqual([(clip.start, clip.end) for clip in original.clips], [(0, 100)])
 
     def test_open_timeline_does_not_guess_between_conflicting_or_ambiguous_selectors(self):

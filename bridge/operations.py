@@ -19,7 +19,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.14.3"
+AGENT_VERSION = "1.14.4"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
@@ -822,7 +822,7 @@ class ResolveOperations:
             matches = [
                 (item, info)
                 for item, info in all_items
-                if identifier in (str(info.get("id")), str(info.get("label")), str(info.get("unique_id")), str(info.get("name")))
+                if identifier in (str(info[key]) for key in ("id", "label", "unique_id", "name") if info.get(key))
             ]
             if not matches:
                 missing.append(identifier)
@@ -831,7 +831,7 @@ class ResolveOperations:
                 (
                     match
                     for match in matches
-                    if identifier in (match[1].get("id"), match[1].get("label"), str(match[1].get("unique_id")))
+                    if identifier in (str(match[1][key]) for key in ("id", "label", "unique_id") if match[1].get(key))
                 ),
                 None,
             )
@@ -847,6 +847,48 @@ class ResolveOperations:
                 % ", ".join(missing)
             )
         return found
+
+    def _delete_timeline_items(self, timeline, targets, ripple=False):
+        """Confirm removal on the affected tracks before reporting success or rebuilding."""
+        if not targets:
+            raise OperationError("Could not identify clips to delete. Nothing was removed.")
+        unique = {info["id"]: (item, info) for item, info in targets}
+        tracks = {}
+        for item, info in unique.values():
+            track = (info["track_type"], info["track_index"])
+            tracks.setdefault(track, []).append((item, info.get("unique_id")))
+
+        def read_track(track):
+            items = call(timeline, "GetItemListInTrack", None, *track)
+            if isinstance(items, dict):
+                return list(items.values())
+            return items if isinstance(items, (list, tuple)) else None
+
+        before = {}
+        for track, selected in tracks.items():
+            items = read_track(track)
+            if items is None or len(items) < len(selected):
+                raise OperationError("Could not read the selected tracks before deletion. Nothing was removed.")
+            before[track] = len(items)
+
+        if not timeline.DeleteClips([item for item, _ in unique.values()], ripple):
+            raise OperationError("Resolve rejected the deletion. It may have applied in part. Inspect the timeline before retrying.")
+
+        unverified = "Could not verify clip removal on %s track %d. Inspect the timeline before retrying."
+        for track, selected in tracks.items():
+            remaining = read_track(track)
+            if remaining is None or len(remaining) > before[track] - len(selected):
+                raise OperationError(unverified % track)
+            wanted_ids = {str(uid) for _, uid in selected if uid}
+            without_ids = [item for item, uid in selected if not uid]
+            for candidate in remaining:
+                if candidate in without_ids:
+                    raise OperationError(unverified % track)
+                if wanted_ids:
+                    uid = call(candidate, "GetUniqueId", None)
+                    if not uid or str(uid) in wanted_ids:
+                        raise OperationError(unverified % track)
+        return list(unique)
 
     def _playhead_frame(self, timeline):
         """Absolute timeline frame under the playhead (same space as GetStart)."""
@@ -1498,9 +1540,8 @@ class ResolveOperations:
                              "trackIndex": info["track_index"], "mediaType": 1 if info["track_type"] == "video" else 2})
         if not self._is_current_timeline(self._project(), timeline):
             raise OperationError("The active timeline changed before the split. Nothing was removed; checkpoint: %s." % checkpoint_info["name"])
-        if not timeline.DeleteClips([item], False):
-            raise OperationError("Resolve refused to remove the original clip. Checkpoint: %s." % checkpoint_info["name"])
         try:
+            self._delete_timeline_items(timeline, [(item, info)])
             pool = self._media_pool()
             if not self._is_current_timeline(self._project(), timeline):
                 raise OperationError("The active timeline changed before the halves could be placed.")
@@ -2419,9 +2460,8 @@ class ResolveOperations:
             raise OperationError("item_ids is required. Call timeline_overview for valid ids.")
         targets = self._find_timeline_items(ids)
         ripple = bool(params.get("ripple", False))
-        if not self._timeline().DeleteClips([item for item, _ in targets], ripple):
-            raise OperationError("Resolve refused to delete the selected clips.")
-        return {"deleted": [info["id"] for _, info in targets], "ripple": ripple}
+        deleted = self._delete_timeline_items(self._timeline(), targets, ripple)
+        return {"deleted": deleted, "ripple": ripple}
 
     def _op_save_project(self, _params):
         if not self.resolve.GetProjectManager().SaveProject():
@@ -3249,9 +3289,7 @@ class ResolveOperations:
         original_identity = self._timeline_identity(timeline)
         preview, preview_identity = self._duplicate_current(params.get("name") or "Dialogue cleanup", open_duplicate=True)
         try:
-            copied = [item for item, _ in self._timeline_items(preview)]
-            if not preview.DeleteClips(copied, False):
-                raise OperationError("Resolve refused to replace the copied dialogue clips.")
+            self._delete_timeline_items(preview, self._timeline_items(preview))
             batches = []
             record = start
             for begin, finish in kept:
