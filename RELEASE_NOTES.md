@@ -1,5 +1,28 @@
 # Release Notes
 
+## v1.14.4 — Safer uninstall and verified clip removal (2026-11-12)
+
+### Fixed
+
+- Setup and uninstall share a lock. Uninstall refuses to remove the runtime
+  while a worker or Lua operation is active. The Lua worker also checks for
+  maintenance before it begins serving requests.
+- Clip deletion checks the affected tracks before reporting success. Split and
+  dialogue cleanup stop before placing replacements if removal is uncertain.
+  The recovery timeline is retained.
+- CI uses pinned Node 24 actions, avoids storing checkout credentials in the
+  repository, and limits the time each job can run.
+
+### Validation and limits
+
+The fixes passed automated checks on Windows, macOS, and Linux. The local suite
+ran 193 tests, with 185 passing and eight platform-specific skips. The website
+build, npm package check, and offline doctor passed. The editing and Lua
+startup fixes were tested against simulated Resolve objects. Live editing on
+Resolve Free 21.2 still needs a disposable-project test.
+
+Changes in [#12](https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/pull/12).
+
 ## v1.14.3 — Safer timeline edits, bridge recovery, and setup (2026-11-07)
 
 This patch protects timeline rebuilds, improves recovery when the bridge loses a reply, and keeps setup away from unrelated user files.
