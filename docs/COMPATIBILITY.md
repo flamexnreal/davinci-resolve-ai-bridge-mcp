@@ -43,6 +43,14 @@ The same public MCP tools and shared operation implementation are retained.
 This restores the tested editing workflows on current Free; it does not unlock
 Studio-only AI/effects or promise every API on every platform/build.
 
+### Resolve Free 21.2.0.6 smoke check
+
+On **macOS Free 21.2.0.6**, bridge **v1.14.3** started the native-file Lua
+worker and answered `resolve_status` over MCP on 2026-11-11. The doctor also
+completed a round trip over the Lua transport. This confirms startup and status
+connectivity on this build only; timeline editing operations have not been
+validated here.
+
 ### Remaining limits
 
 Live current-Free validation covers macOS only. Windows/Linux native Resolve,
