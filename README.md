@@ -287,7 +287,7 @@ python3 tools/doctor.py
 
 Use `python3 tools/doctor.py --offline` for file checks without contacting Resolve.
 
-Before an update, stop the worker and your MCP clients. The installer validates the replacement before activating it and keeps the previous runtime for recovery.
+Before updating or uninstalling, stop the worker and quit your MCP clients. The installer validates the replacement before activating it and keeps the previous runtime for recovery.
 
 [Troubleshooting](docs/TROUBLESHOOTING.md) · [Testing](docs/TESTING.md) · [Release notes](RELEASE_NOTES.md)
 

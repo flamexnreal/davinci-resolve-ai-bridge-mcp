@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import venv
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 
@@ -93,49 +94,65 @@ def _check_install_destination(path):
     fail("Refusing to replace %s: it is not a recognized bridge runtime. Choose an empty runtime directory." % path)
 
 
-def prepare_runtime(skip=False, with_ffmpeg=False):
-    """Stage dependencies before activation; retain previous runtime for recovery.
-
-    A rename gap is recoverable on the next run, including after a hard kill.
-    Stop MCP clients and the Console worker before updating.
-    """
-    global HOME
-    destination = HOME
-    _check_install_destination(destination)
-    previous = destination.with_name(destination.name + ".previous")
-    _check_install_destination(previous)
+def _check_workers_stopped(destination, action):
     heartbeat = destination / "agent.json"
     from bridge import lua_transport
     if lua_transport.probe(destination).get("connected"):
-        fail("Stop the Lua worker and MCP clients before updating this runtime.")
+        fail("Stop the Lua worker and MCP clients before %s this runtime." % action)
     if heartbeat.exists():
         try:
             active = time.time() - float(json.loads(heartbeat.read_text())["time"]) < 25
         except (ValueError, KeyError, OSError, TypeError):
             active = True
         if active:
-            fail("Stop the Console worker and MCP clients before updating this runtime.")
+            fail("Stop the Console worker and MCP clients before %s this runtime." % action)
+
+
+@contextmanager
+def _runtime_maintenance(destination, action):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    lock = destination.with_name(destination.name + ".install-lock")
+    marker = destination.with_name(destination.name + ".install-lock")
     try:
-        lock.mkdir()
+        marker.mkdir()
     except FileExistsError:
-        fail("Another install may be running. If it stopped, remove %s and retry." % lock)
-    stage = None
-    worker_lock = None
-    lua_operation_lock = None
+        fail("Another install or uninstall may be running. If it stopped, remove %s and retry." % marker)
     try:
+        with ExitStack() as locks:
+            worker = WorkerLock(destination)
+            if not worker.acquire():
+                fail("Stop the running Console worker before %s this runtime." % action)
+            locks.callback(worker.release)
+            lua_operation = WorkerLock(destination.with_name(destination.name + ".lua-operation"))
+            if not lua_operation.acquire():
+                fail("Wait for the active Lua operation and stop its worker before %s." % action)
+            locks.callback(lua_operation.release)
+            _check_workers_stopped(destination, action)
+            yield
+    finally:
+        marker.rmdir()
+
+
+@contextmanager
+def prepare_runtime(skip=False, with_ffmpeg=False):
+    """Activate a validated runtime and hold the lock through configuration."""
+    destination = HOME
+    previous = destination.with_name(destination.name + ".previous")
+    _check_install_destination(destination)
+    _check_install_destination(previous)
+    with _runtime_maintenance(destination, "updating"):
         _check_install_destination(destination)
         _check_install_destination(previous)
         if not destination.exists() and previous.exists():
             os.replace(previous, destination)
-        if destination.exists():
-            worker_lock = WorkerLock(destination)
-            if not worker_lock.acquire():
-                fail("Stop the running bridge worker before updating this runtime.")
-            lua_operation_lock = WorkerLock(destination.with_name(destination.name + ".lua-operation"))
-            if not lua_operation_lock.acquire():
-                fail("Wait for the active Lua operation and stop its worker before updating.")
+        _stage_runtime(destination, previous, skip, with_ffmpeg)
+        yield
+
+
+def _stage_runtime(destination, previous, skip, with_ffmpeg):
+    """Stage dependencies before activation and retain the previous runtime."""
+    global HOME
+    stage = None
+    try:
         stage = Path(tempfile.mkdtemp(prefix=destination.name + ".stage-", dir=destination.parent))
         HOME = stage
         copy_runtime(runtime_home=destination)
@@ -179,12 +196,6 @@ def prepare_runtime(skip=False, with_ffmpeg=False):
                 shutil.rmtree(stage)
         except OSError as exc:
             print("Could not remove the abandoned staging folder %s: %s" % (stage, exc), file=sys.stderr)
-        finally:
-            if worker_lock is not None:
-                worker_lock.release()
-            if lua_operation_lock is not None:
-                lua_operation_lock.release()
-            lock.rmdir()
 
 
 def get_token(rotate=False):
@@ -620,22 +631,33 @@ def probe_direct_attach():
         return {"ok": False, "loadable": False, "reason": str(exc)}
 
 
+def _can_uninstall(destination):
+    if _is_runtime_link(destination):
+        fail("Refusing to uninstall through a linked directory: %s" % destination)
+    if not destination.exists():
+        print("Nothing to remove at %s" % destination)
+        return False
+    if not _is_installed_runtime(destination):
+        fail("Refusing to remove %s: it is not a recognized bridge installation." % destination)
+    return True
+
+
 def remove_runtime():
-    if _is_runtime_link(HOME):
-        fail("Refusing to uninstall through a linked directory: %s" % HOME)
-    if not HOME.exists():
-        print("Nothing to remove at %s" % HOME)
+    destination = HOME
+    if not _can_uninstall(destination):
         return
-    if not _is_installed_runtime(HOME):
-        fail("Refusing to remove %s: it is not a recognized bridge installation." % HOME)
-    answer = input("Delete %s and its token? Type DELETE to confirm: " % HOME).strip()
-    if answer != "DELETE":
-        print("Uninstall cancelled.")
-        return
-    shutil.rmtree(HOME)
-    print("Removed %s" % HOME)
-    for folder in remove_menu_scripts():
-        print("Removed %s" % folder)
+    with _runtime_maintenance(destination, "uninstalling"):
+        if not _can_uninstall(destination):
+            return
+        answer = input("Delete %s and its token? Type DELETE to confirm: " % destination).strip()
+        if answer != "DELETE":
+            print("Uninstall cancelled.")
+            return
+        _check_workers_stopped(destination, "uninstalling")
+        shutil.rmtree(destination)
+        print("Removed %s" % destination)
+        for folder in remove_menu_scripts():
+            print("Removed %s" % folder)
     print("Remove the resolve-ai-bridge entry from your AI client's MCP settings separately.")
 
 
@@ -660,26 +682,26 @@ def main():
     print("Free 21.1+: use Start AI Bridge (Lua); Python runs only in the external MCP server.")
     print("Python startup remains available on Python-enabled builds and Studio.\n")
 
-    prepare_runtime(skip=args.skip_deps, with_ffmpeg=args.with_ffmpeg)
-    print("[0/5] Activated validated runtime; previous installation retained.")
-    token = get_token(rotate=args.rotate_token)
-    print("[3/5] Writing the authenticated MCP configuration...")
-    _entry, _config, claude_line, codex_line = write_configs(token)
-    menu_paths = [] if args.no_menu else install_menu_scripts()
-    if args.no_menu:
-        print("[4/5] Skipped the Workspace > Scripts menu entries (--no-menu).")
-    elif menu_paths:
-        print("[4/5] Installed the Workspace > Scripts menu entries.")
-    else:
-        print("[4/5] Could not install the Workspace > Scripts menu entries. Use the Console fallback below.")
-    skill_paths = install_skills()
-    print("[5/5] Installed the Resolve editing skill in standard skill locations.")
-    launcher_paths = install_global_launcher()
-    if launcher_paths:
-        print("      Installed global CLI launcher at %s" % launcher_paths[0])
-    auto_configured = auto_configure_clients(_entry)
-    if auto_configured:
-        print("      Auto-configured clients: %s" % ", ".join(auto_configured))
+    with prepare_runtime(skip=args.skip_deps, with_ffmpeg=args.with_ffmpeg):
+        print("[0/5] Activated validated runtime; previous installation retained.")
+        token = get_token(rotate=args.rotate_token)
+        print("[3/5] Writing the authenticated MCP configuration...")
+        _entry, _config, claude_line, codex_line = write_configs(token)
+        menu_paths = [] if args.no_menu else install_menu_scripts()
+        if args.no_menu:
+            print("[4/5] Skipped the Workspace > Scripts menu entries (--no-menu).")
+        elif menu_paths:
+            print("[4/5] Installed the Workspace > Scripts menu entries.")
+        else:
+            print("[4/5] Could not install the Workspace > Scripts menu entries. Use the Console fallback below.")
+        skill_paths = install_skills()
+        print("[5/5] Installed the Resolve editing skill in standard skill locations.")
+        launcher_paths = install_global_launcher()
+        if launcher_paths:
+            print("      Installed global CLI launcher at %s" % launcher_paths[0])
+        auto_configured = auto_configure_clients(_entry)
+        if auto_configured:
+            print("      Auto-configured clients: %s" % ", ".join(auto_configured))
 
     direct = probe_direct_attach()
 

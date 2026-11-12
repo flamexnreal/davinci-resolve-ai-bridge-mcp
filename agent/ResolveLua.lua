@@ -5,9 +5,12 @@ local home = BRIDGE_HOME or os.getenv("RESOLVE_AI_BRIDGE_HOME") or
 local action = BRIDGE_ACTION or "start"
 local app = fusion or fu
 assert(app and app.OpenFile, "This Resolve build has no native Fusion file API")
-if bmd and bmd.direxists and bmd.direxists(home .. ".install-lock") then
-  error("Bridge installation is in progress; start after it completes")
+local function check_maintenance()
+  if bmd and bmd.direxists and bmd.direxists(home .. ".install-lock") then
+    error("Bridge install or uninstall is in progress; retry after it completes")
+  end
 end
+check_maintenance()
 
 local function read_file(path, first_line, limit)
   local f = app:OpenFile(path, 1) -- FILE_MODE_READ (not exported as a Lua constant)
@@ -145,6 +148,9 @@ end
 
 local ok, err = xpcall(function()
   heartbeat(true)
+  -- Publish our presence before checking again. If maintenance began while
+  -- the script was loading, do not start serving requests.
+  check_maintenance()
   print("RESOLVE AI BRIDGE LUA READY")
   while app:GetData(owner_key) == ops.session do
     local now = os.time()

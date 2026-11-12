@@ -235,7 +235,8 @@ class ReliabilityTests(unittest.TestCase):
         original.write_text("old working runtime")
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies", side_effect=RuntimeError("pip failed")):
             with self.assertRaisesRegex(RuntimeError, "pip failed"):
-                installer.prepare_runtime()
+                with installer.prepare_runtime():
+                    pass
         self.assertEqual(original.read_text(), "old working runtime")
 
     def test_successful_update_retains_previous_and_token(self):
@@ -245,7 +246,8 @@ class ReliabilityTests(unittest.TestCase):
         (self.home / "ResolveConsole.py").touch()
         (self.home / "bridge/original.py").write_text("old")
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies"):
-            installer.prepare_runtime(skip=True)
+            with installer.prepare_runtime(skip=True):
+                pass
         self.assertTrue((self.home / "bridge/server.py").exists())
         previous = self.home.with_name(self.home.name + ".previous")
         self.assertEqual((previous / "bridge/original.py").read_text(), "old")
@@ -256,7 +258,8 @@ class ReliabilityTests(unittest.TestCase):
         previous = self.home.with_name(self.home.name + ".previous")
         os.replace(self.home, previous)
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies", side_effect=RuntimeError("pip failed")):
-            with self.assertRaises(RuntimeError): installer.prepare_runtime()
+            with self.assertRaises(RuntimeError), installer.prepare_runtime():
+                pass
         self.assertEqual((self.home / "token.txt").read_text().strip(), self.runtime.token)
 
     def test_interrupted_activation_restores_runtime(self):
@@ -272,5 +275,6 @@ class ReliabilityTests(unittest.TestCase):
                 raise KeyboardInterrupt()
             return replace(source, target)
         with patch.object(installer, "HOME", self.home), patch.object(installer, "install_dependencies"), patch.object(installer.os, "replace", side_effect=interrupt):
-            with self.assertRaises(KeyboardInterrupt): installer.prepare_runtime(skip=True)
+            with self.assertRaises(KeyboardInterrupt), installer.prepare_runtime(skip=True):
+                pass
         self.assertEqual(original.read_text(), "old")

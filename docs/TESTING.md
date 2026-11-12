@@ -56,7 +56,7 @@ Use a disposable project/timeline with short media. Start the Console worker, th
 2. On a timeline starting at 01:00:00:00, request a source `timeline_frame` at the playhead. Confirm it is visible as an image and labeled source-only.
 3. Place adjacent clips and target the exact cut frame. Confirm `get_clip_transform(item_id="playhead")` selects the right-hand clip.
 4. Call `preview_timeline`, edit a static transform, then compare the original and preview by timeline IDs. Confirm the original remains untouched.
-5. Split a normal-rate clip with a simple grade. Inspect both halves and the retained checkpoint. Use Resolve manually for Fusion clips, speed changes or advanced clip metadata.
+5. Split a normal-rate clip with a simple grade. Inspect both halves and the retained checkpoint. On a disposable duplicate, delete the last clip on a track and confirm the bridge reports it removed. Use Resolve manually for Fusion clips, speed changes or advanced clip metadata.
 6. On a clip with a pre-existing Fusion effect, use `change_clip_speed(speed=0.75)` then `speed=1`. Confirm the existing effect chain remains connected. Reset does not claim ownership of legacy/user TimeSpeed nodes.
 7. Analyze stereo audio, trailing silence, and a trimmed source range. Confirm each channel's peak is visible and exported WAV duration matches the selection.
 8. On one isolated dialogue clip or aligned AV pair, call `review_silence`. Audition yellow markers. Pass only accepted marker IDs to `apply_silence_cuts`. Confirm the original is intact and the preview closes the selected gaps. Check audio gain, fades and sync manually.

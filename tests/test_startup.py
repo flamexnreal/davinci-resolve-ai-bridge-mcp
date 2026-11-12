@@ -157,7 +157,8 @@ class StartupTests(unittest.TestCase):
         try:
             with patch.object(installer, "HOME", self.home), contextlib.redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit):
-                    installer.prepare_runtime(skip=True)
+                    with installer.prepare_runtime(skip=True):
+                        pass
             self.assertFalse(self.home.with_name(self.home.name + ".install-lock").exists())
         finally:
             lock.release()

@@ -239,12 +239,13 @@ class LuaProtocolTests(unittest.TestCase):
             self.assertEqual(received.count("finish_operation"), 2)
             self.assertEqual(set(blocked), {"call", "finish_operation"})
 
-    def test_worker_survives_a_temporarily_unavailable_native_write_slot(self):
+    def run_worker_with_native_slots(self, maintenance_after_heartbeat=False):
         files = {name: (ROOT / "agent/lua" / name).read_text(encoding="utf-8")
                  for name in ("json_raw.lua", "sha256.lua", "rpc.lua")}
         files.update({"token.txt": TOKEN, "lua-agent.json": "", "lua-inbox.json": "{}"})
         self.lua.globals().files = self.lua.table_from(files)
         self.lua.globals().BRIDGE_HOME = "fixture"
+        self.lua.globals().maintenance_after_heartbeat = maintenance_after_heartbeat
         self.lua.execute('''
             opens, writes, messages = 0, {}, {}
             fusion = {data = {}}
@@ -277,16 +278,30 @@ class LuaProtocolTests(unittest.TestCase):
             end
             bmd = {getpid = function() return 123 end, wait = function(seconds)
               if seconds == 0.005 then fusion:SetData("ResolveAIBridge.NativeSession", nil) end
+            end, direxists = function(path)
+              return path == "fixture.install-lock" and maintenance_after_heartbeat and #writes > 0
             end}
             resolve = {GetVersionString = function() return "21.1.2.10" end,
                        GetProductName = function() return "DaVinci Resolve" end}
             print = function(message) messages[#messages + 1] = message end
         ''')
         self.lua.execute((ROOT / "agent/ResolveLua.lua").read_text(encoding="utf-8"))
+
+    def test_worker_survives_a_temporarily_unavailable_native_write_slot(self):
+        self.run_worker_with_native_slots()
         self.assertEqual(list(self.lua.globals().messages.values()), ["RESOLVE AI BRIDGE LUA READY"])
         self.assertEqual(self.lua.globals().opens, 3)
         heartbeat = json.loads(json.loads(self.lua.globals().writes[1])["payload"])
         self.assertTrue(heartbeat["active"])
+
+    def test_worker_does_not_start_serving_during_runtime_maintenance(self):
+        self.run_worker_with_native_slots(maintenance_after_heartbeat=True)
+        lua = self.lua.globals()
+        self.assertIn("install or uninstall is in progress", lua.messages[1])
+        self.assertEqual(len(lua.messages), 1)
+        heartbeat = json.loads(json.loads(lua.writes[2])["payload"])
+        self.assertFalse(heartbeat["active"])
+        self.assertEqual(heartbeat["served"], 0)
 
     def test_private_attributes_and_truncation_are_explicit(self):
         self.begin()
