@@ -164,28 +164,51 @@ class ReliabilityTests(unittest.TestCase):
 
     def test_long_job_heartbeat_and_client_timeout(self):
         entered, release = threading.Event(), threading.Event()
+
         def job(*args):
-            entered.set(); release.wait(5); return "done"
+            entered.set()
+            release.wait(10)
+            return "done"
+
+        deadline_passed = False
+        client_clock = Mock(wraps=time)
+
+        def poll_until_dispatched(_seconds):
+            nonlocal deadline_passed
+            self.assertTrue(entered.wait(5), "The worker did not start the request")
+            deadline_passed = True
+
+        def wait_for_busy_heartbeat(after=0):
+            limit = time.monotonic() + 4
+            while time.monotonic() < limit:
+                beat = client.heartbeat()
+                if beat and beat["busy"] and beat["time"] > after:
+                    return beat
+                time.sleep(.05)
+            self.fail("The reporter did not publish a fresh busy heartbeat")
+
+        # Drive the client's wait deadline only after dispatch. The worker's
+        # wall-clock deadline still applies while it picks up the request.
+        client_clock.sleep.side_effect = poll_until_dispatched
+        client_clock.monotonic.side_effect = lambda: time.monotonic() + (30 if deadline_passed else 0)
         self.ops.dispatch.side_effect = job
         self.runtime.thread = threading.Thread(target=self.runtime._loop)
         self.runtime.thread.start()
         try:
-            with self.assertRaisesRegex(client.BridgeTimeout, "not confirmed cancellation"):
-                client.call("add_marker", timeout=.2)
+            with patch.object(client, "time", client_clock), \
+                    self.assertRaisesRegex(client.BridgeTimeout, "not confirmed cancellation"):
+                client.call("add_marker", timeout=10)
             self.assertIsNone(client._observed)
-            self.assertTrue(entered.is_set())
-            time.sleep(1.1)
-            beat = client.heartbeat(max_age=1.1)
-            self.assertTrue(beat["busy"])
-            self.assertEqual(beat["state"], "running")
-            # Advance wall clock beyond the old 25-second offline threshold.
-            future = time.time() + 30
-            with patch.object(console.time, "time", return_value=future):
-                self.runtime._heartbeat()
-                self.assertIsNotNone(client.heartbeat())
             # Reporter never invokes Resolve status or identity while blocked.
             calls = self.ops.queue_context.call_count
-            time.sleep(1.1)
+            beat = wait_for_busy_heartbeat()
+            self.assertEqual(beat["state"], "running")
+            # Advance the worker and client's wall clocks past the offline
+            # threshold and wait for the real reporter to refresh the heartbeat.
+            future_clock = Mock(wraps=time)
+            future_clock.time.side_effect = lambda: time.time() + 30
+            with patch.object(console, "time", future_clock), patch.object(client, "time", future_clock):
+                self.assertEqual(wait_for_busy_heartbeat(beat["time"] + 25)["state"], "running")
             self.assertEqual(self.ops.queue_context.call_count, calls)
         finally:
             release.set()
