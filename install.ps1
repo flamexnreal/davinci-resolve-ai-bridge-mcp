@@ -25,6 +25,10 @@ if (-not $python) {
     throw "Python 3.10 or newer is required. Install it from https://www.python.org/downloads/ and reopen PowerShell before trying again."
 }
 
+# Install the published release, not whatever is on main. Bump this with the
+# version in docs/RELEASING.md; tests/test_setup.py fails if it drifts.
+$releaseTag = "v1.14.4"
+
 Write-Host "==> Downloading and installing DaVinci Resolve AI Bridge..."
 
 $previousLocation = Get-Location
@@ -33,7 +37,7 @@ New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
 
 try {
     $zipPath = Join-Path $tmpDir "repo.zip"
-    Invoke-WebRequest -Uri "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/archive/refs/heads/main.zip" -OutFile $zipPath -UseBasicParsing
+    Invoke-WebRequest -Uri "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/archive/refs/tags/$($releaseTag).zip" -OutFile $zipPath -UseBasicParsing
     # .NET ZIP extraction also handles temporary paths containing brackets.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $tmpDir)

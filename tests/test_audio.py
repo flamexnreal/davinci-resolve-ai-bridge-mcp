@@ -1,11 +1,13 @@
 import math
+import os
 import struct
+import time
 import tempfile
 import unittest
 import wave
 from pathlib import Path
 from unittest.mock import Mock, patch
-from bridge.operations import ResolveOperations, OperationError
+from bridge.operations import ResolveOperations, OperationError, TEMP_OUTPUT_MAX_AGE
 from fakes import Clip, Media, Project, Resolve
 
 class AudioTests(unittest.TestCase):
@@ -55,3 +57,53 @@ class AudioTests(unittest.TestCase):
         self.run_audio('silence_cuts');self.assertFalse(list((self.directory/'resolve-audio-analysis').glob('*.wav')))
     def test_invalid_threshold(self):
         with self.assertRaises(OperationError):self.run_audio('silence_cuts',silence_threshold_db=float('nan'))
+    def test_analyze_does_not_keep_wav(self):
+        r=self.run_audio('analyze');self.assertNotIn('wav_path',r)
+        self.assertFalse(list((self.directory/'resolve-audio-analysis').glob('*.wav')))
+    def test_old_temp_outputs_pruned(self):
+        folder=self.directory/'resolve-audio-analysis';folder.mkdir()
+        old,recent,other=folder/'slice_old.wav',folder/'slice_recent.wav',folder/'notes.txt'
+        for path in (old,recent,other):path.write_bytes(b'x')
+        stale=time.time()-TEMP_OUTPUT_MAX_AGE-60
+        os.utime(old,(stale,stale));os.utime(other,(stale,stale))
+        r=self.run_audio('export_slice');self.assertTrue(Path(r['wav_path']).is_file())
+        self.assertFalse(old.exists());self.assertTrue(recent.exists());self.assertTrue(other.exists())
+
+class TrimmedClipSyncTests(unittest.TestCase):
+    """Regression: captions drifted when the clip under the playhead was trimmed or not first."""
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup);self.directory=Path(self.tmp.name)
+        self.source=self.directory/'dialogue.wav'
+        # Seconds 0-2 silent, 2-4 loud: only the correct source window sees the loud half.
+        with wave.open(str(self.source),'wb') as w:
+            w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000)
+            w.writeframes(struct.pack('<h',0)*96000+struct.pack('<h',20000)*96000)
+        media=Media(self.source)
+        self.first=Clip(86400,86448,media,source=0,kind='audio',name='first')
+        self.second=Clip(86448,86496,media,source=48,kind='audio',name='second')
+        self.project=Project([self.first,self.second]);timeline=self.project.current
+        timeline.start=86400;timeline.start_tc='01:00:00:00'
+        self.op=ResolveOperations(lambda:Resolve(self.project))
+    def run_audio(self,current,**kw):
+        self.project.current.current=current;commands=[]
+        def decode(command,**kwargs):
+            commands.append(command);start=float(command[command.index('-ss')+1]);duration=float(command[command.index('-t')+1])
+            with wave.open(str(self.source),'rb') as src:
+                src.setpos(min(src.getnframes(),round(start*src.getframerate())));raw=src.readframes(round(duration*src.getframerate()))
+                with wave.open(command[-1],'wb') as dst:dst.setparams(src.getparams());dst.writeframes(raw)
+            return Mock(returncode=0,stderr=b'')
+        with patch('shutil.which',return_value='ffmpeg'),patch('subprocess.run',side_effect=decode),patch('tempfile.gettempdir',return_value=self.tmp.name):
+            return self.op._op_timeline_audio(dict(track_index=1,**kw)),commands
+    def test_trimmed_second_clip_under_playhead(self):
+        r,commands=self.run_audio('01:00:03:00',action='analyze')
+        self.assertEqual(r['clip_name'],'second');self.assertEqual(r['timeline_start_frame'],86472)
+        # Clip starts 2 s into its source (left trim) and the playhead is 1 s into the clip.
+        self.assertEqual(r['source_start_sec'],3.0);self.assertEqual(float(commands[0][commands[0].index('-ss')+1]),3.0)
+        self.assertEqual(r['duration_sec'],1.0);self.assertGreater(r['rms_dbfs'],-10)
+    def test_untrimmed_first_clip_is_silent(self):
+        r,_=self.run_audio('01:00:00:12',action='silence_cuts')
+        self.assertEqual(r['clip_name'],'first');self.assertEqual(r['source_start_sec'],0.5)
+        self.assertEqual(r['cuts'][0]['timeline_start_frame'],86412);self.assertEqual(r['cuts'][0]['timeline_end_frame'],86448)
+    def test_whole_clip_uses_trim_in_point(self):
+        r,_=self.run_audio('01:00:03:00',action='silence_cuts',whole_clip=True)
+        self.assertEqual(r['source_start_sec'],2.0);self.assertEqual(r['cuts'],[])

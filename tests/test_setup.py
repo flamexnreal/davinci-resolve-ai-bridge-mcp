@@ -162,6 +162,9 @@ class SetupTests(unittest.TestCase):
         self.assertEqual(json.loads((ROOT/'package.json').read_text())['version'],AGENT_VERSION)
         self.assertIn('version = "%s"'%AGENT_VERSION,(ROOT/'pyproject.toml').read_text())
         self.assertIn('VERSION="%s"'%AGENT_VERSION,(ROOT/'agent/lua/rpc.lua').read_text())
+        # One-line installers download the release tag, so they must move with the version.
+        self.assertIn('RELEASE_TAG="v%s"'%AGENT_VERSION,(ROOT/'install.sh').read_text())
+        self.assertIn('$releaseTag = "v%s"'%AGENT_VERSION,(ROOT/'install.ps1').read_text())
     def test_required_npm_payload(self):
         package=json.loads((ROOT/'package.json').read_text());self.assertIn('requirements.txt',package['files'])
         self.assertNotIn('react',package.get('dependencies',{}));self.assertNotIn('main',package)

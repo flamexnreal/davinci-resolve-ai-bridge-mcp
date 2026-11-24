@@ -34,6 +34,19 @@ async def check():
         assert any(isinstance(part, ImageContent) for part in content), converted
     with patch.object(server, '_result', return_value=json.dumps({'ok':False,'error':'offline'})):
         assert isinstance(server.timeline_frame()[0], TextContent)
+    marker = next(tool for tool in tools if tool.name == 'add_marker')
+    schema = getattr(marker, 'inputSchema', None) or getattr(marker, 'input_schema', None)
+    assert 'timeline_frame' in schema['properties'], schema
+    with patch.object(server, '_result', return_value='{}') as result:
+        server.add_marker('Onset', timeline_frame=86424)
+        assert result.call_args[0][1]['timeline_frame'] == 86424, result.call_args
+        server.delete_marker(timeline_frame=86424)
+        assert result.call_args[0][1] == {'frame': None, 'timeline_frame': 86424}, result.call_args
+        # Long audio ranges get proportionally more time than the old fixed 120 s.
+        server.timeline_audio(max_duration_seconds=3600)
+        assert result.call_args[1]['timeout'] == 480, result.call_args
+        server.timeline_audio()
+        assert result.call_args[1]['timeout'] == 150, result.call_args
 asyncio.run(check())
 '''
         with tempfile.TemporaryDirectory() as home:

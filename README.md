@@ -53,6 +53,8 @@ curl -fsSL https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-brid
 irm https://raw.githubusercontent.com/flamexnreal/davinci-resolve-ai-bridge-mcp/main/install.ps1 | iex
 ```
 
+Both scripts download the latest published release (the tag pinned in the script), not unreleased work on `main`.
+
 From a downloaded/cloned repository, run `python3 install.py --with-ffmpeg` (Windows: `py install.py --with-ffmpeg`), or use `install-macos.command` / `install-windows.bat` for the base install.
 
 Node/npm is only needed for the npm installer and optional website/motion-graphics development.
@@ -159,7 +161,7 @@ Studio can use the same menu workflow. To allow direct attach, set **Preferences
 | `get_clip_grade`, `set_clip_grade`, `keyframe_clip_saturation`, `animate_color_fx` | Inspect/change available grade controls and Fusion color animation on bridge-owned nodes. |
 | `apply_blur_effect`, `apply_spotlight_mask` | Stackable Fusion blurs (gaussian, defocus, directional) and spotlight masks, static or keyframed. |
 | `inspect_fusion` | Read-only view of a clip's Fusion nodes and the bridge's effect chain. |
-| `add_marker`, `delete_marker`, `set_clip_property`, `set_clip_color`, `set_clip_enabled` | Markers and clip metadata/state. |
+| `add_marker`, `delete_marker`, `set_clip_property`, `set_clip_color`, `set_clip_enabled` | Markers (by offset or absolute `timeline_frame`) and clip metadata/state. |
 | `add_track`, `set_track_name`, `delete_clips`, `save_project` | Track management, explicitly requested deletion, and saving. |
 | `list_render_presets`, `render_current_timeline`, `render_status` | Inspect presets, queue/start an approved render, and follow its progress. |
 
@@ -190,7 +192,7 @@ For custom typography, lower thirds, or animated callouts, your AI can create a 
 4. Get fresh IDs from `timeline_overview`, make edits, and inspect after each change.
 5. Use `compare_timelines(original, preview)` to review structural changes. Audition/view the result in Resolve too: the comparison does not render pixels or compare all Fusion, color, or Fairlight data.
 
-All public `frame` inputs and clip start/end positions use **absolute timeline frames**. Marker offsets are relative to timeline start. Timecodes support non-drop-frame and 29.97/59.94 drop-frame (`HH:MM:SS;FF`). Cut end positions are exclusive.
+All public `frame` inputs and clip start/end positions use **absolute timeline frames**. Marker offsets are relative to timeline start: `add_marker`/`delete_marker` take either `frame` (offset) or `timeline_frame` (absolute, as returned by `timeline_overview` and `timeline_audio`), report both, and refuse positions outside the timeline. Timecodes support non-drop-frame and 29.97/59.94 drop-frame (`HH:MM:SS;FF`). Cut end positions are exclusive.
 
 Fusion effects (`animate_zoom`, blur, spotlight, saturation, color fx) are the exception, because they live inside one clip: `start_frame`, `end_frame` and keyframe `frame` count from the clip's first frame (0). Pass `timeline_start_frame`, `timeline_end_frame` or keyframe `timeline_frame` to use absolute timeline frames instead.
 
