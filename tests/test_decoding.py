@@ -25,6 +25,8 @@ class DecoderTests(unittest.TestCase):
             with patch('tempfile.gettempdir',return_value=directory):
                 result=op._op_timeline_audio({'item_id':clip.uid,'action':'analyze'})
                 self.assertTrue(result['is_clipping']);self.assertEqual(result['timeline_start_frame'],86424)
+                self.assertNotIn('wav_path',result)
+                result=op._op_timeline_audio({'item_id':clip.uid,'action':'export_slice'})
                 with wave.open(result['wav_path'],'rb') as w:self.assertEqual(w.getnframes()/w.getframerate(),1)
     def test_real_source_image_at_nonzero_start(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -33,8 +35,11 @@ class DecoderTests(unittest.TestCase):
             clip=Clip(86400,86448,Media(source));project=Project([clip]);timeline=project.current
             timeline.start=86400;timeline.start_tc='01:00:00:00';timeline.current='01:00:01:00'
             op=ResolveOperations(lambda:Resolve(project))
+            stale=Path(directory)/'resolve-frame-captures'/'frame_old.jpg';stale.parent.mkdir();stale.write_bytes(b'x')
+            os.utime(stale,(1,1))
             with patch('tempfile.gettempdir',return_value=directory):
                 result=op._op_timeline_frame({'mode':'source','max_width':160})
+                self.assertFalse(stale.exists())
                 self.assertEqual((result['width'],result['height']),(160,90))
                 self.assertEqual(result['frame'],86424);self.assertFalse(result['composited'])
                 self.assertTrue(Path(result['file_path']).is_file())

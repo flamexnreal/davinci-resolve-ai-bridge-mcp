@@ -103,6 +103,8 @@ The public Resolve scripting API does not expose every action from the Edit page
 
 - timeline_frame returns a native MCP image. Check `composited`; source fallback excludes grades, Fusion, overlays and transforms. Do not verify a visual effect from a source-only image.
 - timeline_audio uses per-channel peaks and channel energy. Check truncation and absolute timeline offsets; silence intervals use 50 ms windows and exclusive ends.
+- Place markers from timeline_audio or timeline_overview results with add_marker's `timeline_frame` (absolute). Its `frame` argument is an offset from timeline start.
+- Only timeline_audio's export_slice keeps a WAV (`wav_path`). Bridge stills and audio slices in the temp folder are deleted after an hour; copy anything you need to keep.
 - review_silence places markers only. Audition candidates and obtain user approval of the selected marker IDs before apply_silence_cuts. Application creates a duplicate and supports an isolated clip or aligned AV pair; complex timelines stay manual.
 - Stale markers are refused after timeline edits. Reanalyze rather than bypassing the check.
 - project_health reports active-timeline source/gap/disabled-track issues; gaps can be intentional. On Resolve Free it also flags timelines above UHD or 60 fps, which Free cannot render. It does not inspect the full Fairlight mix or queued render settings.

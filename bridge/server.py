@@ -75,6 +75,17 @@ def _result(operation: str, params: Optional[dict[str, Any]] = None, timeout: fl
         )
 
 
+def _audio_timeout(max_duration_seconds: Any) -> float:
+    """Allow for decoding plus analysis of the requested range (about 2 s per audio minute)."""
+    try:
+        seconds = float(max_duration_seconds)
+    except (TypeError, ValueError):
+        return 120.0
+    if seconds != seconds or seconds <= 0:  # NaN or invalid; the operation reports the error.
+        return 120.0
+    return 120.0 + min(seconds, 3600.0) * 0.1
+
+
 def _frames(params: dict[str, Any], end_frame: Optional[int], timeline_start_frame: Optional[int],
             timeline_end_frame: Optional[int]) -> None:
     """Add the optional effect frame arguments that were supplied."""
@@ -130,6 +141,7 @@ def timeline_frame(
     Auto attempts a composited still, then Free-compatible ffmpeg source extraction.
     Source fallback excludes timeline transforms, grades, Fusion and overlays.
     mode='composite' fails explicitly when a true timeline still is unavailable.
+    The still is also saved at file_path and deleted after an hour.
     """
     payload = json.loads(_result("timeline_frame", {"timecode": timecode, "frame": frame,
                           "max_width": max_width, "format": format, "mode": mode}, timeout=100))
@@ -166,11 +178,13 @@ def timeline_audio(
     whole_clip starts at the clip in-point. Decode is capped at max_duration_seconds.
     Cut end frames are exclusive; timeline_* fields use absolute timeline coordinates.
     Known retiming is rejected rather than guessed. Needs ffmpeg or macOS afconvert.
+    Only export_slice keeps its WAV (wav_path); bridge temp files are deleted after an hour.
     """
     return _result("timeline_audio", {"action": action, "track_index": track_index, "item_id": item_id,
                    "silence_threshold_db": silence_threshold_db, "min_silence_duration": min_silence_duration,
                    "max_duration_seconds": max_duration_seconds, "whole_clip": whole_clip,
-                   "lead_offset_ms": lead_offset_ms, "threshold_db": threshold_db}, timeout=120)
+                   "lead_offset_ms": lead_offset_ms, "threshold_db": threshold_db},
+                   timeout=_audio_timeout(max_duration_seconds))
 
 
 @mcp.tool()
@@ -239,7 +253,8 @@ def review_silence(item_id: Optional[str] = None, track_index: int = 1,
     """
     return _result("review_silence", {"item_id": item_id, "track_index": track_index,
                    "silence_threshold_db": silence_threshold_db, "min_silence_duration": min_silence_duration,
-                   "max_duration_seconds": max_duration_seconds}, timeout=120)
+                   "max_duration_seconds": max_duration_seconds},
+                   timeout=_audio_timeout(max_duration_seconds))
 
 
 @mcp.tool()
@@ -629,18 +644,25 @@ def add_marker(
     color: str = "Blue",
     frame: Optional[int] = None,
     duration: int = 1,
+    timeline_frame: Optional[int] = None,
 ) -> str:
-    """Add a timeline marker. Omit frame to use the current playhead; frame values are relative to timeline start."""
+    """Add a timeline marker at the playhead, at frame (offset from timeline start), or at timeline_frame.
+
+    timeline_frame is the absolute frame used by timeline_overview, split_clip and
+    timeline_audio results, so pass those values as timeline_frame, not frame.
+    Out-of-range positions are refused. The result reports both spaces.
+    """
     return _result(
         "add_marker",
-        {"name": name, "note": note, "color": color, "frame": frame, "duration": duration},
+        {"name": name, "note": note, "color": color, "frame": frame, "duration": duration,
+         "timeline_frame": timeline_frame},
     )
 
 
 @mcp.tool()
-def delete_marker(frame: int) -> str:
-    """Delete the timeline marker at a frame relative to timeline start."""
-    return _result("delete_marker", {"frame": frame})
+def delete_marker(frame: Optional[int] = None, timeline_frame: Optional[int] = None) -> str:
+    """Delete the timeline marker at frame (offset from timeline start) or at an absolute timeline_frame."""
+    return _result("delete_marker", {"frame": frame, "timeline_frame": timeline_frame})
 
 
 @mcp.tool()

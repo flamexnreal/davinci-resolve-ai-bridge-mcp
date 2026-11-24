@@ -13,6 +13,7 @@ import ``mcp``, ``fusionscript``, or anything from ``bridge.server`` here.
 
 import json
 import math
+import operator
 import os
 import time
 import uuid
@@ -156,6 +157,31 @@ def plain(value):
 
 def _absolute(value):
     return str(Path(str(value)).expanduser().resolve())
+
+
+# Bridge-made frame stills and audio slices live in the system temp folder so
+# the caller can open them. Keep them long enough to use, then delete them.
+TEMP_OUTPUT_MAX_AGE = 3600
+
+
+def _sum_squares(values):
+    """Sum of squares of integer PCM samples, without a per-sample Python loop."""
+    return sum(map(operator.mul, values, values))
+
+
+def _prune_temp_outputs(directory, patterns, max_age=TEMP_OUTPUT_MAX_AGE, now=None):
+    """Best-effort removal of this bridge's own old temp outputs. Returns the count removed."""
+    now = time.time() if now is None else now
+    removed = 0
+    for pattern in patterns:
+        for path in Path(directory).glob(pattern):
+            try:
+                if path.is_file() and now - path.stat().st_mtime > max_age:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                pass  # In use or already gone; try again on the next call.
+    return removed
 
 
 # Reverse of TRANSFORM_FLOATS/BOOLS: Resolve property key -> set_clip_transform
@@ -1878,28 +1904,70 @@ class ResolveOperations:
         self.resolve.OpenPage(page)
         return {"page": call(self.resolve, "GetCurrentPage", page)}
 
+    def _marker_offset(self, timeline, params, required=False):
+        """Resolve marker keys are offsets from timeline start; timeline_frame is absolute.
+
+        Every other public frame (timeline_overview, split_clip, timeline_audio) is an
+        absolute timeline frame, so accept that space explicitly and range-check both.
+        """
+        frame, absolute = params.get("frame"), params.get("timeline_frame")
+        if frame is not None and absolute is not None:
+            raise OperationError("Pass frame (relative to timeline start) or timeline_frame (absolute), not both.")
+        start = int(call(timeline, "GetStartFrame", 0) or 0)
+        if absolute is not None:
+            offset = int(absolute) - start
+        elif frame is not None:
+            offset = int(frame)
+        elif required:
+            raise OperationError("Pass frame (relative to timeline start) or timeline_frame (absolute).")
+        else:
+            return self._current_marker_frame(timeline)
+        end = call(timeline, "GetEndFrame", None)
+        try:
+            length = int(end) - start if end is not None else None
+        except (TypeError, ValueError):
+            length = None
+        if offset < 0 or (length is not None and offset > length):
+            raise OperationError(
+                "Marker position is outside this timeline: offset %d, timeline_frame %d. Valid offsets are 0 to %s "
+                "(timeline_frame %d to %s). Frames from timeline_overview and timeline_audio are absolute; "
+                "pass them as timeline_frame." % (offset, start + offset, length if length is not None else "?",
+                                                  start, start + length if length is not None else "?"))
+        return offset
+
+    @staticmethod
+    def _marker_at(timeline, offset):
+        markers = call(timeline, "GetMarkers", {}) or {}
+        # JSON transports stringify numeric dictionary keys.
+        return any(str(key) in (str(offset), "%s.0" % offset) for key in markers)
+
     def _op_add_marker(self, params):
         timeline = self._timeline()
-        frame = params.get("frame")
-        if frame is None:
-            frame = self._current_marker_frame(timeline)
+        frame = self._marker_offset(timeline, params)
         color = str(params.get("color", "Blue"))
         name = str(params.get("name", "AI marker"))
         note = str(params.get("note", ""))
         duration = max(1, int(params.get("duration", 1) or 1))
         custom_data = str(params.get("custom_data", "resolve-ai-bridge"))
+        start = int(call(timeline, "GetStartFrame", 0) or 0)
+        if self._marker_at(timeline, frame):
+            raise OperationError("A marker already exists at offset %d (timeline_frame %d). Delete it first or pick another frame."
+                                 % (frame, start + frame))
         if not timeline.AddMarker(int(frame), color, name, note, duration, custom_data):
             raise OperationError(
-                "Resolve could not add the marker. A marker may already exist at frame %d, or the "
-                "colour name may be invalid." % int(frame)
+                "Resolve could not add the marker at offset %d (timeline_frame %d). Check the colour name "
+                "(for example Blue, Green, Red or Yellow)." % (frame, start + frame)
             )
-        return {"frame": int(frame), "color": color, "name": name}
+        return {"frame": int(frame), "timeline_frame": start + int(frame), "frame_space": "frame is relative to timeline start",
+                "color": color, "name": name}
 
     def _op_delete_marker(self, params):
-        frame = int(params.get("frame"))
-        if not self._timeline().DeleteMarkerAtFrame(frame):
-            raise OperationError("No marker was deleted at frame %d." % frame)
-        return {"deleted_frame": frame}
+        timeline = self._timeline()
+        frame = self._marker_offset(timeline, params, required=True)
+        start = int(call(timeline, "GetStartFrame", 0) or 0)
+        if not timeline.DeleteMarkerAtFrame(frame):
+            raise OperationError("No marker was deleted at offset %d (timeline_frame %d)." % (frame, start + frame))
+        return {"deleted_frame": frame, "timeline_frame": start + frame}
 
     def _op_set_clip_property(self, params):
         item, info = self._find_timeline_items([params.get("item_id")])[0]
@@ -2652,6 +2720,7 @@ class ResolveOperations:
         max_width = int(params.get("max_width", 1280))
         capture_dir = Path(tempfile.gettempdir()) / "resolve-frame-captures"
         capture_dir.mkdir(parents=True, exist_ok=True)
+        _prune_temp_outputs(capture_dir, ("frame_*.png", "frame_*.jpg"))
         path = capture_dir / ("frame_%s.%s" % (uuid.uuid4().hex, fmt))
         method = None
         clip_name = None
@@ -2699,7 +2768,8 @@ class ResolveOperations:
                 "clip_name": clip_name, "method": method, "composited": method == "export_current_frame_as_still",
                 "note": "Source fallback excludes grades, Fusion, transforms, overlays and timeline retiming." if method == "source_ffmpeg" else "Native timeline still.",
                 "width": width, "height": height, "resized": resized, "format": fmt,
-                "image_base64": base64.b64encode(path.read_bytes()).decode("ascii"), "file_path": str(path)}
+                "image_base64": base64.b64encode(path.read_bytes()).decode("ascii"), "file_path": str(path),
+                "file_kept_seconds": TEMP_OUTPUT_MAX_AGE}
 
     def _op_timeline_audio(self, params):
         import array
@@ -2752,18 +2822,21 @@ class ResolveOperations:
             raise OperationError("Use a finite threshold from -120 to 0 dBFS and a nonnegative silence duration.")
         audio_dir = Path(tempfile.gettempdir()) / "resolve-audio-analysis"
         audio_dir.mkdir(parents=True, exist_ok=True)
+        _prune_temp_outputs(audio_dir, ("slice_*.wav", "decode_*.wav"))
         slice_path = audio_dir / ("slice_%s.wav" % uuid.uuid4().hex)
         full_path = audio_dir / ("decode_%s.wav" % uuid.uuid4().hex)
         ffmpeg, afconvert = self._ffmpeg_path(self.runtime_home), shutil.which("afconvert")
+        # Decoding time grows with the requested range; keep short calls on the old limit.
+        decode_timeout = 90 + duration / 20
         try:
             if ffmpeg:
                 command = [ffmpeg, "-v", "error", "-y", "-ss", "%.9f" % source_seconds, "-i", str(file_path), "-t", "%.9f" % duration,
                            "-vn", "-acodec", "pcm_s16le", "-ar", "48000", str(slice_path)]
-                result = subprocess.run(command, capture_output=True, timeout=90)
+                result = subprocess.run(command, capture_output=True, timeout=decode_timeout)
                 if result.returncode:
                     raise OperationError("ffmpeg could not decode the selected audio range: %s" % result.stderr.decode(errors="replace")[-500:])
             elif afconvert:
-                result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16@48000", str(file_path), str(full_path)], capture_output=True, timeout=90)
+                result = subprocess.run([afconvert, "-f", "WAVE", "-d", "LEI16@48000", str(file_path), str(full_path)], capture_output=True, timeout=decode_timeout)
                 if result.returncode:
                     raise OperationError("afconvert could not decode audio. Install ffmpeg for additional formats.")
                 with wave.open(str(full_path), "rb") as source:
@@ -2807,7 +2880,7 @@ class ResolveOperations:
             for begin in range(0, count, size):
                 finish = min(count, begin + size)
                 block = samples[begin * channels:finish * channels]
-                energy = sum(float(s) * s for s in block) / len(block) / (32768.0 ** 2)
+                energy = _sum_squares(block) / len(block) / (32768.0 ** 2)
                 yield begin / rate, finish / rate, db(math.sqrt(energy))
         def interval(begin, finish):
             relative_start, relative_end = round(begin * fps), round(finish * fps)
@@ -2815,14 +2888,16 @@ class ResolveOperations:
                     "start_frame": relative_start, "end_frame": relative_end,
                     "timeline_start_frame": origin + relative_start, "timeline_end_frame": origin + relative_end}
         if action == "analyze":
-            levels = []
+            levels, total_squares = [], 0
             for channel in range(channels):
                 values = samples[channel::channels]
-                peak = max(abs(v) for v in values) / 32768.0
-                rms = math.sqrt(sum(float(v) * v for v in values) / len(values)) / 32768.0
+                peak = max(max(values), -min(values)) / 32768.0
+                squares = _sum_squares(values)
+                total_squares += squares
+                rms = math.sqrt(squares / len(values)) / 32768.0
                 levels.append({"channel": channel + 1, "peak_dbfs": round(db(peak), 2), "rms_dbfs": round(db(rms), 2), "is_clipping": peak >= 32767 / 32768})
             peak = max(level["peak_dbfs"] for level in levels)
-            rms = db(math.sqrt(sum(float(v) * v for v in samples) / len(samples)) / 32768.0)
+            rms = db(math.sqrt(total_squares / len(samples)) / 32768.0)
             report.update(peak_dbfs=peak, rms_dbfs=round(rms, 2), is_clipping=any(level["is_clipping"] for level in levels),
                           channel_levels=levels, health="warning_loud" if peak >= -0.5 else "warning_quiet" if rms <= -35 else "healthy")
         elif action in ("silence_cuts", "vad_clusters"):
@@ -2857,8 +2932,9 @@ class ResolveOperations:
                     onsets.append({"onset_sec": moment, "frame": round(moment * fps), "timeline_frame": origin + round(moment * fps)})
                 previous = level
             report.update(onsets=onsets, onsets_count=len(onsets), lead_offset_ms=lead * 1000)
-        if action in ("analyze", "export_slice"):
+        if action == "export_slice":
             report["wav_path"] = str(slice_path)
+            report["wav_kept_seconds"] = TEMP_OUTPUT_MAX_AGE
         else:
             slice_path.unlink(missing_ok=True)
         return report

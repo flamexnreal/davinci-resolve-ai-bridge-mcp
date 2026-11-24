@@ -14,7 +14,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARCHIVE_URL = "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/archive/refs/heads/main"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from bridge.operations import AGENT_VERSION  # noqa: E402  (installers pin the release tag)
+
+ARCHIVE_URL = "https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/archive/refs/tags/v" + AGENT_VERSION
+RELEASE_FOLDER = "davinci-resolve-ai-bridge-mcp-" + AGENT_VERSION  # GitHub tag archives drop the "v".
 POWERSHELL = (
     os.environ.get("RESOLVE_BRIDGE_TEST_POWERSHELL")
     or shutil.which("pwsh")
@@ -140,7 +145,7 @@ class BootstrapFixture(unittest.TestCase):
 
 @unittest.skipUnless(POWERSHELL, "PowerShell is not installed")
 class PowerShellBootstrapTests(BootstrapFixture):
-    def run_bootstrap(self, folders=("davinci-resolve-ai-bridge-mcp-main",),
+    def run_bootstrap(self, folders=(RELEASE_FOLDER,),
                       command="py", exit_code=0, pipeline=False, download_fail=False,
                       old_command="", expect_download=True):
         self.archive("zip", folders)
@@ -167,7 +172,7 @@ class PowerShellBootstrapTests(BootstrapFixture):
 
     def test_archive_discovery_and_python_fallbacks(self):
         for command, folder in (
-            ("py", "davinci-resolve-ai-bridge-mcp-main"),
+            ("py", RELEASE_FOLDER),
             ("python3", "renamed project-main"),
             ("python", "renamed project [test]-main"),
         ):
@@ -224,7 +229,7 @@ class PowerShellBootstrapTests(BootstrapFixture):
 
 @unittest.skipUnless(BASH, "POSIX Bash is not available")
 class ShellBootstrapTests(BootstrapFixture):
-    def run_bootstrap(self, folders=("davinci-resolve-ai-bridge-mcp-main",),
+    def run_bootstrap(self, folders=(RELEASE_FOLDER,),
                       command="python3", downloader="curl", exit_code=0,
                       download_fail=False):
         self.archive("tar.gz", folders)
@@ -271,7 +276,7 @@ class ShellBootstrapTests(BootstrapFixture):
 
     def test_archive_discovery_and_command_fallbacks(self):
         for downloader, command, folder in (
-            ("curl", "python3", "davinci-resolve-ai-bridge-mcp-main"),
+            ("curl", "python3", RELEASE_FOLDER),
             ("wget", "python", "renamed project [test]-main"),
         ):
             with self.subTest(downloader=downloader, command=command):

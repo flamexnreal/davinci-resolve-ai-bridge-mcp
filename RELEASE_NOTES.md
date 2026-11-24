@@ -1,5 +1,29 @@
 # Release Notes
 
+## Unreleased
+
+### Fixed
+
+- Temporary files no longer pile up. `timeline_audio` analyze no longer keeps
+  a WAV (about 55 MB for the default five minutes of stereo); only
+  `export_slice` does. Bridge stills and audio slices older than an hour are
+  deleted on the next capture or analysis.
+- `add_marker` and `delete_marker` accept an absolute `timeline_frame`, the
+  space every other tool reports, and return both spaces. Out-of-range
+  positions are refused with a hint, and an existing marker is reported as
+  such instead of a guessed cause.
+- Long `timeline_audio` and `review_silence` ranges get a timeout that grows
+  with `max_duration_seconds` (480 s for an hour), and level analysis runs
+  about twice as fast.
+- The one-line `install.sh` and `install.ps1` installers download the pinned
+  release tag instead of the `main` branch.
+
+### Tests
+
+- Regression tests for the caption desync fix with a trimmed clip that is not
+  first on its track, marker frame conversion, temp-file cleanup, the scaled
+  timeout, and installer tag pinning.
+
 ## v1.14.4 — Safer uninstall and verified clip removal (2026-11-12)
 
 ### Fixed
