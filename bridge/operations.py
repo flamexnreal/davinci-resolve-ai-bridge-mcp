@@ -20,7 +20,7 @@ import uuid
 from pathlib import Path
 
 
-AGENT_VERSION = "1.14.4"
+AGENT_VERSION = "1.14.5"
 PROTOCOL_VERSION = 2
 
 IMAGE_SUFFIXES = {
