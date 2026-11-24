@@ -27,7 +27,7 @@ if (-not $python) {
 
 # Install the published release, not whatever is on main. Bump this with the
 # version in docs/RELEASING.md; tests/test_setup.py fails if it drifts.
-$releaseTag = "v1.14.4"
+$releaseTag = "v1.14.5"
 
 Write-Host "==> Downloading and installing DaVinci Resolve AI Bridge..."
 

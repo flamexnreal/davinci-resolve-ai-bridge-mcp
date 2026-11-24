@@ -29,7 +29,7 @@ trap cleanup EXIT
 
 # Install the published release, not whatever is on main. Bump this with the
 # version in docs/RELEASING.md; tests/test_setup.py fails if it drifts.
-RELEASE_TAG="v1.14.4"
+RELEASE_TAG="v1.14.5"
 ARCHIVE="https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/archive/refs/tags/${RELEASE_TAG}.tar.gz"
 if command -v curl >/dev/null 2>&1; then
     curl -fsSL "$ARCHIVE" | tar -xz -C "$TMP_DIR"

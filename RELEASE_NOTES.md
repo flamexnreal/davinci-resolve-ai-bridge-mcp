@@ -1,28 +1,32 @@
 # Release Notes
 
-## Unreleased
+## v1.14.5 — Audio cleanup, marker frames, and pinned installers (2026-11-24)
 
 ### Fixed
 
-- Temporary files no longer pile up. `timeline_audio` analyze no longer keeps
-  a WAV (about 55 MB for the default five minutes of stereo); only
-  `export_slice` does. Bridge stills and audio slices older than an hour are
-  deleted on the next capture or analysis.
-- `add_marker` and `delete_marker` accept an absolute `timeline_frame`, the
-  space every other tool reports, and return both spaces. Out-of-range
-  positions are refused with a hint, and an existing marker is reported as
-  such instead of a guessed cause.
-- Long `timeline_audio` and `review_silence` ranges get a timeout that grows
-  with `max_duration_seconds` (480 s for an hour), and level analysis runs
-  about twice as fast.
-- The one-line `install.sh` and `install.ps1` installers download the pinned
-  release tag instead of the `main` branch.
+- Audio analysis discards its temporary WAV. Use `export_slice` to keep a
+  WAV. The bridge prunes its stills and audio slices older than an hour
+  on the next capture or analysis.
+- `add_marker` and `delete_marker` accept an absolute `timeline_frame` and
+  report both frame positions. The existing `frame` argument still counts
+  from the start of the timeline. Out-of-range positions and duplicate
+  markers now get clearer messages.
+- Long `timeline_audio` and `review_silence` requests get a timeout that
+  scales with the requested duration. Level analysis also does less
+  per-sample work.
+- The macOS/Linux and Windows one-line installers download a pinned
+  GitHub release archive.
 
-### Tests
+### Validation and limits
 
-- Regression tests for the caption desync fix with a trimmed clip that is not
-  first on its track, marker frame conversion, temp-file cleanup, the scaled
-  timeout, and installer tag pinning.
+Regression tests cover trimmed-clip caption sync, marker coordinates,
+temporary-file cleanup, audio timeouts, and installer version pinning.
+All GitHub checks for the fixes passed on Windows, macOS, and Linux. The
+local suite ran 208 tests, with 200 passing and eight platform-specific skips.
+The website build, npm package check, and offline doctor passed. Resolve
+behavior was tested with simulated Resolve objects.
+
+Changes in [#13](https://github.com/flamexnreal/davinci-resolve-ai-bridge-mcp/pull/13).
 
 ## v1.14.4 — Safer uninstall and verified clip removal (2026-11-12)
 
